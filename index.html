@@ -1,0 +1,598 @@
+<!-- my-page.html --> 
+<script src="https://rawcdn.githack.com/oscarmorrison/md-page/232e97938de9f4d79f4110f6cfd637e186b63317/md-page.js"></script><noscript>
+# Event-Driven Architecture Is Valuable. Event Sourcing Is Often Not.
+
+Event-Driven Architecture (EDA) has transformed how we build distributed systems, enabling loose coupling, independent scalability, and resilient service communication. But a persistent misconception continues to plague architectural discussions: **Event-Driven Architecture requires Event Sourcing**.
+
+This conflation has led countless teams to adopt Event Sourcing unnecessarily, inheriting significant operational complexity without corresponding benefits. The reality is simpler: you can achieve all the advantages of event-driven systems through a "State-First + Event Log" approach that maintains strong consistency, operational simplicity, and the flexibility to choose eventual consistency where it makes sense.
+
+Let's clarify the distinction and explore why Event Sourcing should remain the exception, not the default.
+
+---
+
+## The Real Value of Event-Driven Architecture
+
+Event-driven systems excel at solving fundamental distributed systems challenges:
+
+**Decoupling**: Services communicate through events without direct dependencies. A payment service doesn't need to know about the notification service, inventory service, or analytics pipeline—it simply publishes a `PaymentCompleted` event. 
+
+**Independent Scalability**: Each service scales based on its specific load patterns. Your read-heavy product catalog can scale independently from your write-heavy order processing.
+
+**Resilience**: Failures in one service don't cascade. If the notification service is down, orders still process successfully—notifications catch up when the service recovers.
+
+**Flexibility**: New consumers can subscribe to existing event streams without modifying producers. Adding a new analytics pipeline doesn't require touching your core business logic.
+
+These benefits emerge from the **communication pattern**, not from how you persist data. 
+
+---
+
+## The Dangerous Conflation: EDA ≠ Event Sourcing
+
+Here's where confusion begins. Event-Driven Architecture and Event Sourcing are fundamentally different concepts:
+
+**Event-Driven Architecture** is a communication pattern:
+```
+Service A → Event Bus → Service B, C, D
+```
+
+**Event Sourcing** is a persistence pattern:
+```
+Events = Source of Truth
+Current State = Materialized from Events
+```
+
+You can have Event-Driven Architecture without Event Sourcing. In fact, most successful event-driven systems do exactly that. 
+
+### The Architecture Comparison
+
+**Event-Driven with State-First:**
+```
+┌─────────────────────────────────────┐
+│   Order Service                     │
+│                                     │
+│   1. Validate order                 │
+│   2. Update state (SQL)             │
+│   3. Write event (same txn)         │
+└─────────────────────────────────────┘
+              ↓
+    ┌──────────────────┐
+    │   Database       │
+    │                  │
+    │  orders table    │ ← Source of Truth
+    │  events table    │ ← Audit + Pub/Sub
+    └──────────────────┘
+              ↓
+    Async Event Publisher
+              ↓
+    ┌──────────────────┐
+    │   Event Bus      │
+    │   (Kafka, etc.)  │
+    └──────────────────┘
+              ↓
+    ┌─────────────────────────────────┐
+    │  Notification Service           │
+    │  Inventory Service              │
+    │  Analytics Pipeline             │
+    └─────────────────────────────────┘
+```
+
+**Event-Driven with Event Sourcing:**
+```
+┌─────────────────────────────────────┐
+│   Order Service                     │
+│                                     │
+│   1. Validate against events        │
+│   2. Write new event                │
+└─────────────────────────────────────┘
+              ↓
+    ┌──────────────────┐
+    │   Event Store    │ ← Source of Truth
+    └──────────────────┘
+              ↓
+    ┌──────────────────┐
+    │  Projection      │
+    │  Service         │
+    └──────────────────┘
+              ↓
+    ┌──────────────────┐
+    │  Read Models     │ ← Eventually Consistent
+    └──────────────────┘
+              ↓
+    ┌──────────────────┐
+    │   Event Bus      │
+    └──────────────────┘
+```
+
+Notice the additional complexity: Event Sourcing requires projection services, read model synchronization, and eventual consistency management—none of which are necessary for event-driven communication. 
+
+---
+
+## Event Sourcing: The Hidden Costs
+
+Event Sourcing introduces substantial complexity that teams consistently underestimate:
+
+### 1. Read Model Materialization
+
+Every query requires reconstructing state from events. For a system with millions of entities, this becomes prohibitive. 
+
+**The typical solution**: Build separate read models that are eventually consistent with your event store. 
+
+```
+Query: "Find all locked accounts"
+
+Event Sourcing approach:
+1. Load events for Account 1 → Materialize → Check status
+2. Load events for Account 2 → Materialize → Check status
+...
+N. Load events for Account N → Materialize → Check status
+
+State-First approach:
+SELECT * FROM accounts WHERE status = 'LOCKED';
+```
+
+The irony: you end up maintaining both an event store AND materialized views—essentially two sources of truth with synchronization overhead. 
+
+### 2. Schema Evolution Complexity
+
+Events are immutable, but business requirements evolve. How do you handle old events when your domain model changes? 
+
+**Example scenario**: Your `AccountCreated` event initially stored:
+```json
+{
+  "account_id": "123",
+  "owner": "John Doe",
+  "initial_balance": 1000
+}
+```
+
+Now you need to add KYC compliance fields:
+```json
+{
+  "account_id": "123",
+  "owner": "John Doe",
+  "initial_balance": 1000,
+  "kyc_verified": true,
+  "verification_date": "2025-01-15",
+  "risk_level": "low"
+}
+```
+
+**Your options**:
+- **Upcasting**: Transform old events to new schema during replay (complex logic)
+- **Versioning**: Support multiple event versions simultaneously (maintenance burden)
+- **Modifying old events**: Violates immutability principle entirely
+
+None are simple. State-First uses standard SQL migrations:
+```sql
+ALTER TABLE accounts 
+ADD COLUMN kyc_verified BOOLEAN DEFAULT false,
+ADD COLUMN verification_date DATE,
+ADD COLUMN risk_level VARCHAR(20);
+```
+
+### 3. Operational Complexity
+
+**Event replay** for millions of events takes hours or days. 
+
+**Debugging** requires understanding event sequences, not just current state. A simple question like "Why is this account locked?" requires tracing through potentially hundreds of events.
+
+**Testing** becomes more complex with event-driven flows and eventual consistency.
+
+**Storage** grows continuously—every state change creates a new event that must be retained.
+
+### 4. The Eventual Consistency Trade-off
+
+Event Sourcing with CQRS typically means eventual consistency between write and read sides. 
+
+**Real-world scenario**:
+```
+10:00:00.000 - Account locked (event written)
+10:00:00.100 - Projection service processes event
+10:00:00.200 - Read model updated
+10:00:00.050 - Query: "Is account 123 locked?" → Returns: false
+```
+
+If your business requires strong consistency for queries—"find all locked accounts right now"—you're fighting against the pattern. 
+
+---
+
+## State-First + Event Log: A Pragmatic Alternative
+
+Here's an approach that delivers event-driven benefits without Event Sourcing complexity:
+
+### Implementation with Transactional Outbox Pattern
+
+**Write Operation**: 
+
+```sql
+BEGIN TRANSACTION;
+
+-- Update current state (Source of Truth)
+UPDATE accounts 
+SET 
+  status = 'LOCKED',
+  locked_at = NOW(),
+  locked_reason = 'fraud_detection',
+  version = version + 1
+WHERE 
+  id = @account_id 
+  AND version = @expected_version;  -- Optimistic Locking
+
+-- Record event for audit and pub/sub
+INSERT INTO events (
+  aggregate_id,
+  aggregate_type,
+  event_type,
+  event_version,
+  event_data,
+  created_at
+) VALUES (
+  @account_id,
+  'Account',
+  'AccountLocked',
+  @new_version,
+  '{"reason": "fraud_detection", "locked_by": "system"}',
+  NOW()
+);
+
+COMMIT;
+```
+
+**Read Operation**:
+```sql
+-- Direct query against current state
+SELECT * FROM accounts WHERE status = 'LOCKED';
+
+-- Complex aggregations
+SELECT 
+  status, 
+  COUNT(*) as count,
+  AVG(balance) as avg_balance
+FROM accounts
+GROUP BY status;
+```
+
+**Event Publishing** (asynchronous):
+```python
+# Background worker (e.g., every 100ms)
+def publish_events():
+    events = db.query("""
+        SELECT * FROM events 
+        WHERE published = false 
+        ORDER BY event_version ASC
+        LIMIT 100
+    """)
+    
+    for event in events:
+        event_bus.publish(event)
+        
+        db.execute("""
+            UPDATE events 
+            SET published = true 
+            WHERE id = ?
+        """, event.id)
+```
+
+### What You Gain
+
+| Capability | State-First + Event Log | Event Sourcing |
+|------------|------------------------|----------------|
+| **Complex queries** | Direct SQL, no latency | Requires materialized views  |
+| **Strong consistency** | Transactional guarantee | Eventual (with CQRS)  |
+| **Audit trail** | Complete event log | Complete event log |
+| **Event-driven workflows** | Async event publishing | Native |
+| **Analytics** | Events to data warehouse | Event replay |
+| **Schema evolution** | Standard SQL migrations | Complex upcasting  |
+| **Operational simplicity** | Familiar patterns | Specialized knowledge  |
+| **Recovery** | Standard backup/restore | Event replay (slow) |
+| **Query performance** | Optimized indexes | Materialization overhead  |
+
+---
+
+## Debunking "Legitimate" Event Sourcing Use Cases
+
+Let's critically examine commonly cited justifications for Event Sourcing:
+
+### 1. "Temporal queries are operational requirements"
+
+**The Claim**: "Show me all accounts as of March 15th needs to be fast and frequent"
+
+**The Reality**: Replaying millions of events for every temporal query is not fast. 
+
+**What actually happens in production**:
+
+Systems build **daily snapshots** (materialized views):
+```sql
+CREATE TABLE account_snapshots (
+  account_id UUID,
+  snapshot_date DATE,
+  balance DECIMAL,
+  status VARCHAR,
+  PRIMARY KEY (account_id, snapshot_date)
+);
+
+-- Query
+SELECT * FROM account_snapshots 
+WHERE snapshot_date = '2025-03-15';
+```
+
+**But that's not Event Sourcing anymore—that's State-First with historical snapshots.** 
+
+If you need frequent temporal queries, build snapshots. State-First + Event Log is simpler and more performant.
+
+### 2. "Complex state machines need Event Sourcing"
+
+**The Claim**: "Workflow engines require event sequences to understand state transitions"
+
+**The Reality**: Workflow engines need **Event-Driven Architecture**, not Event Sourcing.
+
+**State-First + Event Log provides identical capabilities**:
+
+```python
+# Saga pattern with State-First
+@event_handler('OrderCreated')
+def handle_order_created(event):
+    # Reserve inventory
+    inventory_service.reserve(event.items)
+    
+@event_handler('InventoryReserved')
+def handle_inventory_reserved(event):
+    # Process payment
+    payment_service.charge(event.order_id)
+    
+@event_handler('PaymentCompleted')
+def handle_payment_completed(event):
+    # Ship order
+    shipping_service.create_shipment(event.order_id)
+```
+
+**What workflows need**:
+- Events in order (Event Log has this)
+- Event type and payload (Event Log has this)
+- Idempotent handlers (both approaches require this)
+
+**What workflows DON'T need**:
+- Events as source of truth for entity state
+- Event replay to reconstruct current state
+
+The workflow reacts to events and updates state. The state itself doesn't need to be event-sourced. 
+
+### 3. "Collaborative editing like Google Docs"
+
+**The Claim**: "Concurrent edits require Event Sourcing for conflict resolution"
+
+**The Reality: This is a niche use case, not applicable to typical business systems.**
+
+| Aspect | Google Docs | Your Business System |
+|--------|-------------|---------------------|
+| **Entities** | Single document | Millions of accounts/orders |
+| **Concurrency** | Many users, one document | Few writes per entity |
+| **Conflict Resolution** | Operational Transformation/CRDTs | Optimistic locking suffices |
+| **Query Pattern** | Single document access | Queries across millions |
+| **State Size** | Small (one document) | Large (millions of entities) |
+
+Google Docs uses **Operational Transformation** or **CRDTs** (Conflict-free Replicated Data Types)—specialized techniques that aren't standard Event Sourcing.
+
+**Your banking/e-commerce system doesn't need this**:
+- Account updates are rarely concurrent (optimistic locking works)
+- Order updates are mostly sequential
+- If needed: pessimistic locking or queue-based processing
+
+This comparison is apples to oranges.
+
+### 4. "Regulatory requirements for immutable audit"
+
+**The Claim**: "Only Event Sourcing provides immutable audit trails"
+
+**The Reality: Immutability is NOT Event Sourcing-specific.**
+
+**State-First + Event Log with cryptographic signatures**:
+
+```sql
+CREATE TABLE events (
+  id UUID PRIMARY KEY,
+  aggregate_id UUID,
+  event_type VARCHAR,
+  event_data JSONB,
+  created_at TIMESTAMP,
+  signature VARCHAR,  -- Cryptographic signature
+  previous_event_hash VARCHAR  -- Blockchain-like chaining
+);
+
+-- On each event insert
+INSERT INTO events VALUES (
+  gen_random_uuid(),
+  @account_id,
+  'AccountLocked',
+  @event_json,
+  NOW(),
+  sign(@event_json, @private_key),
+  hash_of_previous_event(@account_id)
+);
+```
+
+**This provides**:
+- Cryptographic immutability
+- Tampering detection through chaining
+- Append-only enforcement (via DB constraints)
+- Compliance-ready audit trail
+
+**Event Sourcing offers NO additional security**: Events in SQL are equally manipulable as state. Only additional measures (signatures, WORM storage) make it secure—and these work identically with Event Log. 
+
+**Specialized solutions exist independently of Event Sourcing**:
+- Amazon QLDB (Quantum Ledger Database)
+- Azure Confidential Ledger
+- These provide cryptographic guarantees without requiring Event Sourcing as an architecture pattern
+
+### 5. The Banking Ledger Myth
+
+**The Claim**: "Banks use Event Sourcing for their ledgers"
+
+**The Reality**: Banks use double-entry bookkeeping with append-only ledgers, but this isn't Event Sourcing. 
+
+**What banks actually do**:
+
+```sql
+-- Ledger entries (append-only)
+CREATE TABLE ledger_entries (
+  id UUID PRIMARY KEY,
+  account_id UUID,
+  transaction_type VARCHAR,
+  amount DECIMAL,
+  timestamp TIMESTAMP
+);
+
+-- Account balances (current state)
+CREATE TABLE accounts (
+  id UUID PRIMARY KEY,
+  balance DECIMAL,
+  last_updated TIMESTAMP
+);
+
+-- Transaction processing
+BEGIN TRANSACTION;
+  INSERT INTO ledger_entries VALUES (...);
+  UPDATE accounts SET balance = balance + @amount WHERE id = @account_id;
+COMMIT;
+```
+
+**This is a hybrid approach**: Ledger for audit trail, account table for current state. It's closer to "State-First + Event Log" than pure Event Sourcing. 
+
+Banks maintain account tables with current balances for performance. They don't materialize balances from ledger entries for every query—that would be too slow for millions of accounts with thousands of transactions each.
+
+---
+
+## Flexibility: Choosing Your Consistency Model
+
+One crucial advantage of State-First + Event Log: **you choose your consistency model per use case**. 
+
+### Strong Consistency (Default)
+
+For operational queries requiring immediate consistency:
+
+```sql
+-- Transactional write
+BEGIN TRANSACTION;
+  UPDATE accounts SET status = 'LOCKED' WHERE id = @id;
+  INSERT INTO events VALUES (...);
+COMMIT;
+
+-- Immediate query
+SELECT * FROM accounts WHERE status = 'LOCKED';
+-- Returns newly locked account immediately
+```
+
+### Eventual Consistency (When Appropriate)
+
+For analytics, reporting, or non-critical queries, you can build eventually consistent read models: 
+
+```
+┌─────────────────────────────────────┐
+│   Operational Database              │
+│                                     │
+│   accounts table (strong)           │
+│   events table                      │
+└─────────────────────────────────────┘
+              ↓
+    Async Event Stream
+              ↓
+┌─────────────────────────────────────┐
+│   Analytics Database                │
+│                                     │
+│   account_analytics (eventual)      │
+│   - Optimized for aggregations      │
+│   - Denormalized for reporting      │
+└─────────────────────────────────────┘
+```
+
+**Example use case**: Daily executive dashboard showing account statistics. A few seconds of lag is acceptable, and you gain:
+- Independent scaling of analytics workload
+- Optimized schema for reporting queries
+- No impact on operational database performance
+
+**The key difference**: With State-First, eventual consistency is a **choice** for specific read models, not a **requirement** for all queries. 
+
+---
+
+## When Event Sourcing Actually Makes Sense
+
+Event Sourcing isn't wrong—it's specialized. Consider it only when you have:
+
+### Genuinely Legitimate Use Cases (Extremely Rare)
+
+**1. Real-time collaboration on single entities**
+- Google Docs, Figma, Miro
+- Requires Operational Transformation or CRDTs
+- Not transferable to typical business systems with millions of independent entities
+
+**2. Frequent operational temporal queries**
+- "Show account state from 3 hours ago" multiple times daily
+- Even then, snapshots are often better
+- Most systems never need this operationally
+
+**3. Debugging via event replay in development**
+- Useful for reproducing bugs
+- But not for production operations
+- State-First + Event Log can replay events in development environments too
+
+### Red Flags That You Don't Need It
+
+- "It sounds modern and scalable" 
+- "Everyone's talking about it"
+- "Banks use ledgers" (they don't use Event Sourcing the way you think) 
+- "We might need time travel someday" (YAGNI principle applies)
+- "Better audit trail" (event logs provide this too)
+- "Workflow engines" (Event-Driven Architecture suffices)
+- "Compliance requirements" (signed event logs are equally compliant)
+
+---
+
+## Practical Recommendations
+
+### Start Simple
+
+1. **Build with traditional state management**: Use relational databases with proper normalization
+2. **Add event logging**: Implement Transactional Outbox Pattern for audit and pub/sub
+3. **Publish events**: Use an event bus (Kafka, RabbitMQ) for service communication
+4. **Archive events**: Send events to data warehouse for analytics
+
+### Choose Consistency Per Use Case
+
+- **Strong consistency**: Operational queries, critical business logic
+- **Eventual consistency**: Analytics, reporting, non-critical aggregations
+
+### Evolve Only When Necessary
+
+Migrate to Event Sourcing only if you encounter a **specific, measurable problem** that it solves better:
+- "We need operational temporal queries, and snapshots are too slow"
+- "Our state machines are so complex that event sequences are clearer"
+- "Regulatory requirements demand cryptographically signed, immutable event chains" (but verify this with legal—signed event logs usually suffice)
+
+### Avoid Cargo Culting
+
+Don't adopt Event Sourcing because:
+- A conference talk made it sound impressive
+- You assume it's required for microservices (it's not)
+- You believe it automatically solves scalability (it doesn't) 
+- You think it's the "right way" to do event-driven systems (it's one way, not the only way)
+
+---
+
+## Conclusion: Simplicity Over Sophistication
+
+Event-Driven Architecture is invaluable for building scalable, resilient distributed systems. Event Sourcing is a specialized persistence pattern with significant operational costs. 
+
+**The conflation of these two concepts has led to unnecessary complexity in countless systems.**
+
+The pragmatic approach: **State-First + Event Log**. You gain:
+- Strong consistency for operational queries
+- Complete audit trail for compliance
+- Event-driven service communication for decoupling
+- Operational simplicity with familiar patterns
+- Flexibility to choose eventual consistency where appropriate
+
+Reserve Event Sourcing for systems where its specific benefits—temporal queries, complex event-driven workflows—justify its complexity. For the vast majority of business systems, that justification doesn't exist. 
+
+**Remember**: The best architecture is the simplest one that meets your requirements, not the most sophisticated one you can imagine. Event-Driven Architecture doesn't require Event Sourcing. Don't let the conflation of these concepts drive you toward unnecessary complexity.
+
+Choose the right tool for the job. In most cases, that tool is State-First + Event Log, not Event Sourcing.
