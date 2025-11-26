@@ -1,598 +1,1475 @@
-<!-- my-page.html --> 
-<script src="https://rawcdn.githack.com/oscarmorrison/md-page/232e97938de9f4d79f4110f6cfd637e186b63317/md-page.js"></script><noscript>
-# Event-Driven Architecture Is Valuable. Event Sourcing Is Often Not.
-
-Event-Driven Architecture (EDA) has transformed how we build distributed systems, enabling loose coupling, independent scalability, and resilient service communication. But a persistent misconception continues to plague architectural discussions: **Event-Driven Architecture requires Event Sourcing**.
-
-This conflation has led countless teams to adopt Event Sourcing unnecessarily, inheriting significant operational complexity without corresponding benefits. The reality is simpler: you can achieve all the advantages of event-driven systems through a "State-First + Event Log" approach that maintains strong consistency, operational simplicity, and the flexibility to choose eventual consistency where it makes sense.
-
-Let's clarify the distinction and explore why Event Sourcing should remain the exception, not the default.
-
----
-
-## The Real Value of Event-Driven Architecture
-
-Event-driven systems excel at solving fundamental distributed systems challenges:
-
-**Decoupling**: Services communicate through events without direct dependencies. A payment service doesn't need to know about the notification service, inventory service, or analytics pipeline—it simply publishes a `PaymentCompleted` event. 
-
-**Independent Scalability**: Each service scales based on its specific load patterns. Your read-heavy product catalog can scale independently from your write-heavy order processing.
-
-**Resilience**: Failures in one service don't cascade. If the notification service is down, orders still process successfully—notifications catch up when the service recovers.
-
-**Flexibility**: New consumers can subscribe to existing event streams without modifying producers. Adding a new analytics pipeline doesn't require touching your core business logic.
-
-These benefits emerge from the **communication pattern**, not from how you persist data. 
-
----
-
-## The Dangerous Conflation: EDA ≠ Event Sourcing
-
-Here's where confusion begins. Event-Driven Architecture and Event Sourcing are fundamentally different concepts:
-
-**Event-Driven Architecture** is a communication pattern:
-```
-Service A → Event Bus → Service B, C, D
-```
-
-**Event Sourcing** is a persistence pattern:
-```
-Events = Source of Truth
-Current State = Materialized from Events
-```
-
-You can have Event-Driven Architecture without Event Sourcing. In fact, most successful event-driven systems do exactly that. 
-
-### The Architecture Comparison
-
-**Event-Driven with State-First:**
-```
-┌─────────────────────────────────────┐
-│   Order Service                     │
-│                                     │
-│   1. Validate order                 │
-│   2. Update state (SQL)             │
-│   3. Write event (same txn)         │
-└─────────────────────────────────────┘
-              ↓
-    ┌──────────────────┐
-    │   Database       │
-    │                  │
-    │  orders table    │ ← Source of Truth
-    │  events table    │ ← Audit + Pub/Sub
-    └──────────────────┘
-              ↓
-    Async Event Publisher
-              ↓
-    ┌──────────────────┐
-    │   Event Bus      │
-    │   (Kafka, etc.)  │
-    └──────────────────┘
-              ↓
-    ┌─────────────────────────────────┐
-    │  Notification Service           │
-    │  Inventory Service              │
-    │  Analytics Pipeline             │
-    └─────────────────────────────────┘
-```
-
-**Event-Driven with Event Sourcing:**
-```
-┌─────────────────────────────────────┐
-│   Order Service                     │
-│                                     │
-│   1. Validate against events        │
-│   2. Write new event                │
-└─────────────────────────────────────┘
-              ↓
-    ┌──────────────────┐
-    │   Event Store    │ ← Source of Truth
-    └──────────────────┘
-              ↓
-    ┌──────────────────┐
-    │  Projection      │
-    │  Service         │
-    └──────────────────┘
-              ↓
-    ┌──────────────────┐
-    │  Read Models     │ ← Eventually Consistent
-    └──────────────────┘
-              ↓
-    ┌──────────────────┐
-    │   Event Bus      │
-    └──────────────────┘
-```
-
-Notice the additional complexity: Event Sourcing requires projection services, read model synchronization, and eventual consistency management—none of which are necessary for event-driven communication. 
-
----
-
-## Event Sourcing: The Hidden Costs
-
-Event Sourcing introduces substantial complexity that teams consistently underestimate:
-
-### 1. Read Model Materialization
-
-Every query requires reconstructing state from events. For a system with millions of entities, this becomes prohibitive. 
-
-**The typical solution**: Build separate read models that are eventually consistent with your event store. 
-
-```
-Query: "Find all locked accounts"
-
-Event Sourcing approach:
-1. Load events for Account 1 → Materialize → Check status
-2. Load events for Account 2 → Materialize → Check status
-...
-N. Load events for Account N → Materialize → Check status
-
-State-First approach:
-SELECT * FROM accounts WHERE status = 'LOCKED';
-```
-
-The irony: you end up maintaining both an event store AND materialized views—essentially two sources of truth with synchronization overhead. 
-
-### 2. Schema Evolution Complexity
-
-Events are immutable, but business requirements evolve. How do you handle old events when your domain model changes? 
-
-**Example scenario**: Your `AccountCreated` event initially stored:
-```json
-{
-  "account_id": "123",
-  "owner": "John Doe",
-  "initial_balance": 1000
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Event-Driven Architecture Is Not Event Sourcing</title>
+  <style>
+  @font-face {
+  font-family: octicons-link;
+  src: url(data:font/woff;charset=utf-8;base64,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) format('woff');
 }
-```
 
-Now you need to add KYC compliance fields:
-```json
-{
-  "account_id": "123",
-  "owner": "John Doe",
-  "initial_balance": 1000,
-  "kyc_verified": true,
-  "verification_date": "2025-01-15",
-  "risk_level": "low"
+.markdown-body .octicon {
+  display: inline-block;
+  fill: currentColor;
+  vertical-align: text-bottom;
 }
-```
-
-**Your options**:
-- **Upcasting**: Transform old events to new schema during replay (complex logic)
-- **Versioning**: Support multiple event versions simultaneously (maintenance burden)
-- **Modifying old events**: Violates immutability principle entirely
-
-None are simple. State-First uses standard SQL migrations:
-```sql
-ALTER TABLE accounts 
-ADD COLUMN kyc_verified BOOLEAN DEFAULT false,
-ADD COLUMN verification_date DATE,
-ADD COLUMN risk_level VARCHAR(20);
-```
-
-### 3. Operational Complexity
-
-**Event replay** for millions of events takes hours or days. 
-
-**Debugging** requires understanding event sequences, not just current state. A simple question like "Why is this account locked?" requires tracing through potentially hundreds of events.
-
-**Testing** becomes more complex with event-driven flows and eventual consistency.
-
-**Storage** grows continuously—every state change creates a new event that must be retained.
-
-### 4. The Eventual Consistency Trade-off
-
-Event Sourcing with CQRS typically means eventual consistency between write and read sides. 
-
-**Real-world scenario**:
-```
-10:00:00.000 - Account locked (event written)
-10:00:00.100 - Projection service processes event
-10:00:00.200 - Read model updated
-10:00:00.050 - Query: "Is account 123 locked?" → Returns: false
-```
-
-If your business requires strong consistency for queries—"find all locked accounts right now"—you're fighting against the pattern. 
-
----
-
-## State-First + Event Log: A Pragmatic Alternative
-
-Here's an approach that delivers event-driven benefits without Event Sourcing complexity:
-
-### Implementation with Transactional Outbox Pattern
-
-**Write Operation**: 
-
-```sql
-BEGIN TRANSACTION;
-
--- Update current state (Source of Truth)
-UPDATE accounts 
-SET 
-  status = 'LOCKED',
-  locked_at = NOW(),
-  locked_reason = 'fraud_detection',
-  version = version + 1
-WHERE 
-  id = @account_id 
-  AND version = @expected_version;  -- Optimistic Locking
-
--- Record event for audit and pub/sub
-INSERT INTO events (
-  aggregate_id,
-  aggregate_type,
-  event_type,
-  event_version,
-  event_data,
-  created_at
-) VALUES (
-  @account_id,
-  'Account',
-  'AccountLocked',
-  @new_version,
-  '{"reason": "fraud_detection", "locked_by": "system"}',
-  NOW()
-);
-
-COMMIT;
-```
-
-**Read Operation**:
-```sql
--- Direct query against current state
-SELECT * FROM accounts WHERE status = 'LOCKED';
-
--- Complex aggregations
-SELECT 
-  status, 
-  COUNT(*) as count,
-  AVG(balance) as avg_balance
-FROM accounts
-GROUP BY status;
-```
-
-**Event Publishing** (asynchronous):
-```python
-# Background worker (e.g., every 100ms)
-def publish_events():
-    events = db.query("""
-        SELECT * FROM events 
-        WHERE published = false 
-        ORDER BY event_version ASC
-        LIMIT 100
-    """)
-    
-    for event in events:
-        event_bus.publish(event)
-        
-        db.execute("""
-            UPDATE events 
-            SET published = true 
-            WHERE id = ?
-        """, event.id)
-```
-
-### What You Gain
-
-| Capability | State-First + Event Log | Event Sourcing |
-|------------|------------------------|----------------|
-| **Complex queries** | Direct SQL, no latency | Requires materialized views  |
-| **Strong consistency** | Transactional guarantee | Eventual (with CQRS)  |
-| **Audit trail** | Complete event log | Complete event log |
-| **Event-driven workflows** | Async event publishing | Native |
-| **Analytics** | Events to data warehouse | Event replay |
-| **Schema evolution** | Standard SQL migrations | Complex upcasting  |
-| **Operational simplicity** | Familiar patterns | Specialized knowledge  |
-| **Recovery** | Standard backup/restore | Event replay (slow) |
-| **Query performance** | Optimized indexes | Materialization overhead  |
-
----
-
-## Debunking "Legitimate" Event Sourcing Use Cases
-
-Let's critically examine commonly cited justifications for Event Sourcing:
-
-### 1. "Temporal queries are operational requirements"
-
-**The Claim**: "Show me all accounts as of March 15th needs to be fast and frequent"
-
-**The Reality**: Replaying millions of events for every temporal query is not fast. 
-
-**What actually happens in production**:
-
-Systems build **daily snapshots** (materialized views):
-```sql
-CREATE TABLE account_snapshots (
-  account_id UUID,
-  snapshot_date DATE,
-  balance DECIMAL,
-  status VARCHAR,
-  PRIMARY KEY (account_id, snapshot_date)
-);
-
--- Query
-SELECT * FROM account_snapshots 
-WHERE snapshot_date = '2025-03-15';
-```
-
-**But that's not Event Sourcing anymore—that's State-First with historical snapshots.** 
-
-If you need frequent temporal queries, build snapshots. State-First + Event Log is simpler and more performant.
-
-### 2. "Complex state machines need Event Sourcing"
-
-**The Claim**: "Workflow engines require event sequences to understand state transitions"
-
-**The Reality**: Workflow engines need **Event-Driven Architecture**, not Event Sourcing.
-
-**State-First + Event Log provides identical capabilities**:
-
-```python
-# Saga pattern with State-First
-@event_handler('OrderCreated')
-def handle_order_created(event):
-    # Reserve inventory
-    inventory_service.reserve(event.items)
-    
-@event_handler('InventoryReserved')
-def handle_inventory_reserved(event):
-    # Process payment
-    payment_service.charge(event.order_id)
-    
-@event_handler('PaymentCompleted')
-def handle_payment_completed(event):
-    # Ship order
-    shipping_service.create_shipment(event.order_id)
-```
-
-**What workflows need**:
-- Events in order (Event Log has this)
-- Event type and payload (Event Log has this)
-- Idempotent handlers (both approaches require this)
-
-**What workflows DON'T need**:
-- Events as source of truth for entity state
-- Event replay to reconstruct current state
-
-The workflow reacts to events and updates state. The state itself doesn't need to be event-sourced. 
-
-### 3. "Collaborative editing like Google Docs"
-
-**The Claim**: "Concurrent edits require Event Sourcing for conflict resolution"
-
-**The Reality: This is a niche use case, not applicable to typical business systems.**
-
-| Aspect | Google Docs | Your Business System |
-|--------|-------------|---------------------|
-| **Entities** | Single document | Millions of accounts/orders |
-| **Concurrency** | Many users, one document | Few writes per entity |
-| **Conflict Resolution** | Operational Transformation/CRDTs | Optimistic locking suffices |
-| **Query Pattern** | Single document access | Queries across millions |
-| **State Size** | Small (one document) | Large (millions of entities) |
-
-Google Docs uses **Operational Transformation** or **CRDTs** (Conflict-free Replicated Data Types)—specialized techniques that aren't standard Event Sourcing.
-
-**Your banking/e-commerce system doesn't need this**:
-- Account updates are rarely concurrent (optimistic locking works)
-- Order updates are mostly sequential
-- If needed: pessimistic locking or queue-based processing
-
-This comparison is apples to oranges.
-
-### 4. "Regulatory requirements for immutable audit"
-
-**The Claim**: "Only Event Sourcing provides immutable audit trails"
-
-**The Reality: Immutability is NOT Event Sourcing-specific.**
-
-**State-First + Event Log with cryptographic signatures**:
-
-```sql
-CREATE TABLE events (
-  id UUID PRIMARY KEY,
-  aggregate_id UUID,
-  event_type VARCHAR,
-  event_data JSONB,
-  created_at TIMESTAMP,
-  signature VARCHAR,  -- Cryptographic signature
-  previous_event_hash VARCHAR  -- Blockchain-like chaining
-);
-
--- On each event insert
-INSERT INTO events VALUES (
-  gen_random_uuid(),
-  @account_id,
-  'AccountLocked',
-  @event_json,
-  NOW(),
-  sign(@event_json, @private_key),
-  hash_of_previous_event(@account_id)
-);
-```
-
-**This provides**:
-- Cryptographic immutability
-- Tampering detection through chaining
-- Append-only enforcement (via DB constraints)
-- Compliance-ready audit trail
-
-**Event Sourcing offers NO additional security**: Events in SQL are equally manipulable as state. Only additional measures (signatures, WORM storage) make it secure—and these work identically with Event Log. 
-
-**Specialized solutions exist independently of Event Sourcing**:
-- Amazon QLDB (Quantum Ledger Database)
-- Azure Confidential Ledger
-- These provide cryptographic guarantees without requiring Event Sourcing as an architecture pattern
-
-### 5. The Banking Ledger Myth
-
-**The Claim**: "Banks use Event Sourcing for their ledgers"
-
-**The Reality**: Banks use double-entry bookkeeping with append-only ledgers, but this isn't Event Sourcing. 
-
-**What banks actually do**:
-
-```sql
--- Ledger entries (append-only)
-CREATE TABLE ledger_entries (
-  id UUID PRIMARY KEY,
-  account_id UUID,
-  transaction_type VARCHAR,
-  amount DECIMAL,
-  timestamp TIMESTAMP
-);
-
--- Account balances (current state)
-CREATE TABLE accounts (
-  id UUID PRIMARY KEY,
-  balance DECIMAL,
-  last_updated TIMESTAMP
-);
-
--- Transaction processing
-BEGIN TRANSACTION;
-  INSERT INTO ledger_entries VALUES (...);
-  UPDATE accounts SET balance = balance + @amount WHERE id = @account_id;
-COMMIT;
-```
-
-**This is a hybrid approach**: Ledger for audit trail, account table for current state. It's closer to "State-First + Event Log" than pure Event Sourcing. 
-
-Banks maintain account tables with current balances for performance. They don't materialize balances from ledger entries for every query—that would be too slow for millions of accounts with thousands of transactions each.
-
----
-
-## Flexibility: Choosing Your Consistency Model
-
-One crucial advantage of State-First + Event Log: **you choose your consistency model per use case**. 
-
-### Strong Consistency (Default)
-
-For operational queries requiring immediate consistency:
-
-```sql
--- Transactional write
-BEGIN TRANSACTION;
-  UPDATE accounts SET status = 'LOCKED' WHERE id = @id;
-  INSERT INTO events VALUES (...);
-COMMIT;
-
--- Immediate query
-SELECT * FROM accounts WHERE status = 'LOCKED';
--- Returns newly locked account immediately
-```
-
-### Eventual Consistency (When Appropriate)
-
-For analytics, reporting, or non-critical queries, you can build eventually consistent read models: 
-
-```
-┌─────────────────────────────────────┐
-│   Operational Database              │
-│                                     │
-│   accounts table (strong)           │
-│   events table                      │
-└─────────────────────────────────────┘
-              ↓
-    Async Event Stream
-              ↓
-┌─────────────────────────────────────┐
-│   Analytics Database                │
-│                                     │
-│   account_analytics (eventual)      │
-│   - Optimized for aggregations      │
-│   - Denormalized for reporting      │
-└─────────────────────────────────────┘
-```
-
-**Example use case**: Daily executive dashboard showing account statistics. A few seconds of lag is acceptable, and you gain:
-- Independent scaling of analytics workload
-- Optimized schema for reporting queries
-- No impact on operational database performance
-
-**The key difference**: With State-First, eventual consistency is a **choice** for specific read models, not a **requirement** for all queries. 
-
----
-
-## When Event Sourcing Actually Makes Sense
-
-Event Sourcing isn't wrong—it's specialized. Consider it only when you have:
-
-### Genuinely Legitimate Use Cases (Extremely Rare)
-
-**1. Real-time collaboration on single entities**
-- Google Docs, Figma, Miro
-- Requires Operational Transformation or CRDTs
-- Not transferable to typical business systems with millions of independent entities
-
-**2. Frequent operational temporal queries**
-- "Show account state from 3 hours ago" multiple times daily
-- Even then, snapshots are often better
-- Most systems never need this operationally
-
-**3. Debugging via event replay in development**
-- Useful for reproducing bugs
-- But not for production operations
-- State-First + Event Log can replay events in development environments too
-
-### Red Flags That You Don't Need It
-
-- "It sounds modern and scalable" 
-- "Everyone's talking about it"
-- "Banks use ledgers" (they don't use Event Sourcing the way you think) 
-- "We might need time travel someday" (YAGNI principle applies)
-- "Better audit trail" (event logs provide this too)
-- "Workflow engines" (Event-Driven Architecture suffices)
-- "Compliance requirements" (signed event logs are equally compliant)
-
----
-
-## Practical Recommendations
-
-### Start Simple
-
-1. **Build with traditional state management**: Use relational databases with proper normalization
-2. **Add event logging**: Implement Transactional Outbox Pattern for audit and pub/sub
-3. **Publish events**: Use an event bus (Kafka, RabbitMQ) for service communication
-4. **Archive events**: Send events to data warehouse for analytics
-
-### Choose Consistency Per Use Case
-
-- **Strong consistency**: Operational queries, critical business logic
-- **Eventual consistency**: Analytics, reporting, non-critical aggregations
-
-### Evolve Only When Necessary
-
-Migrate to Event Sourcing only if you encounter a **specific, measurable problem** that it solves better:
-- "We need operational temporal queries, and snapshots are too slow"
-- "Our state machines are so complex that event sequences are clearer"
-- "Regulatory requirements demand cryptographically signed, immutable event chains" (but verify this with legal—signed event logs usually suffice)
-
-### Avoid Cargo Culting
-
-Don't adopt Event Sourcing because:
-- A conference talk made it sound impressive
-- You assume it's required for microservices (it's not)
-- You believe it automatically solves scalability (it doesn't) 
-- You think it's the "right way" to do event-driven systems (it's one way, not the only way)
-
----
-
-## Conclusion: Simplicity Over Sophistication
-
-Event-Driven Architecture is invaluable for building scalable, resilient distributed systems. Event Sourcing is a specialized persistence pattern with significant operational costs. 
-
-**The conflation of these two concepts has led to unnecessary complexity in countless systems.**
-
-The pragmatic approach: **State-First + Event Log**. You gain:
-- Strong consistency for operational queries
-- Complete audit trail for compliance
-- Event-driven service communication for decoupling
-- Operational simplicity with familiar patterns
-- Flexibility to choose eventual consistency where appropriate
-
-Reserve Event Sourcing for systems where its specific benefits—temporal queries, complex event-driven workflows—justify its complexity. For the vast majority of business systems, that justification doesn't exist. 
-
-**Remember**: The best architecture is the simplest one that meets your requirements, not the most sophisticated one you can imagine. Event-Driven Architecture doesn't require Event Sourcing. Don't let the conflation of these concepts drive you toward unnecessary complexity.
-
-Choose the right tool for the job. In most cases, that tool is State-First + Event Log, not Event Sourcing.
+
+.markdown-body .anchor {
+  float: left;
+  line-height: 1;
+  margin-left: -20px;
+  padding-right: 4px;
+}
+
+.markdown-body .anchor:focus {
+  outline: none;
+}
+
+.markdown-body h1 .octicon-link,
+.markdown-body h2 .octicon-link,
+.markdown-body h3 .octicon-link,
+.markdown-body h4 .octicon-link,
+.markdown-body h5 .octicon-link,
+.markdown-body h6 .octicon-link {
+  color: #1b1f23;
+  vertical-align: middle;
+  visibility: hidden;
+}
+
+.markdown-body h1:hover .anchor,
+.markdown-body h2:hover .anchor,
+.markdown-body h3:hover .anchor,
+.markdown-body h4:hover .anchor,
+.markdown-body h5:hover .anchor,
+.markdown-body h6:hover .anchor {
+  text-decoration: none;
+}
+
+.markdown-body h1:hover .anchor .octicon-link,
+.markdown-body h2:hover .anchor .octicon-link,
+.markdown-body h3:hover .anchor .octicon-link,
+.markdown-body h4:hover .anchor .octicon-link,
+.markdown-body h5:hover .anchor .octicon-link,
+.markdown-body h6:hover .anchor .octicon-link {
+  visibility: visible;
+}
+
+.markdown-body {
+  -ms-text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+  color: #24292e;
+  line-height: 1.5;
+  font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif,Apple Color Emoji,Segoe UI Emoji,Segoe UI Symbol;
+  font-size: 16px;
+  line-height: 1.5;
+  word-wrap: break-word;
+}
+
+.markdown-body .pl-c {
+  color: #6a737d;
+}
+
+.markdown-body .pl-c1,
+.markdown-body .pl-s .pl-v {
+  color: #005cc5;
+}
+
+.markdown-body .pl-e,
+.markdown-body .pl-en {
+  color: #6f42c1;
+}
+
+.markdown-body .pl-s .pl-s1,
+.markdown-body .pl-smi {
+  color: #24292e;
+}
+
+.markdown-body .pl-ent {
+  color: #22863a;
+}
+
+.markdown-body .pl-k {
+  color: #d73a49;
+}
+
+.markdown-body .pl-pds,
+.markdown-body .pl-s,
+.markdown-body .pl-s .pl-pse .pl-s1,
+.markdown-body .pl-sr,
+.markdown-body .pl-sr .pl-cce,
+.markdown-body .pl-sr .pl-sra,
+.markdown-body .pl-sr .pl-sre {
+  color: #032f62;
+}
+
+.markdown-body .pl-smw,
+.markdown-body .pl-v {
+  color: #e36209;
+}
+
+.markdown-body .pl-bu {
+  color: #b31d28;
+}
+
+.markdown-body .pl-ii {
+  background-color: #b31d28;
+  color: #fafbfc;
+}
+
+.markdown-body .pl-c2 {
+  background-color: #d73a49;
+  color: #fafbfc;
+}
+
+.markdown-body .pl-c2:before {
+  content: "^M";
+}
+
+.markdown-body .pl-sr .pl-cce {
+  color: #22863a;
+  font-weight: 700;
+}
+
+.markdown-body .pl-ml {
+  color: #735c0f;
+}
+
+.markdown-body .pl-mh,
+.markdown-body .pl-mh .pl-en,
+.markdown-body .pl-ms {
+  color: #005cc5;
+  font-weight: 700;
+}
+
+.markdown-body .pl-mi {
+  color: #24292e;
+  font-style: italic;
+}
+
+.markdown-body .pl-mb {
+  color: #24292e;
+  font-weight: 700;
+}
+
+.markdown-body .pl-md {
+  background-color: #ffeef0;
+  color: #b31d28;
+}
+
+.markdown-body .pl-mi1 {
+  background-color: #f0fff4;
+  color: #22863a;
+}
+
+.markdown-body .pl-mc {
+  background-color: #ffebda;
+  color: #e36209;
+}
+
+.markdown-body .pl-mi2 {
+  background-color: #005cc5;
+  color: #f6f8fa;
+}
+
+.markdown-body .pl-mdr {
+  color: #6f42c1;
+  font-weight: 700;
+}
+
+.markdown-body .pl-ba {
+  color: #586069;
+}
+
+.markdown-body .pl-sg {
+  color: #959da5;
+}
+
+.markdown-body .pl-corl {
+  color: #032f62;
+  text-decoration: underline;
+}
+
+.markdown-body details {
+  display: block;
+}
+
+.markdown-body summary {
+  display: list-item;
+}
+
+.markdown-body a {
+  background-color: transparent;
+}
+
+.markdown-body a:active,
+.markdown-body a:hover {
+  outline-width: 0;
+}
+
+.markdown-body strong {
+  font-weight: inherit;
+  font-weight: bolder;
+}
+
+.markdown-body h1 {
+  font-size: 2em;
+  margin: .67em 0;
+}
+
+.markdown-body img {
+  border-style: none;
+}
+
+.markdown-body code,
+.markdown-body kbd,
+.markdown-body pre {
+  font-family: monospace,monospace;
+  font-size: 1em;
+}
+
+.markdown-body hr {
+  box-sizing: content-box;
+  height: 0;
+  overflow: visible;
+}
+
+.markdown-body input {
+  font: inherit;
+  margin: 0;
+}
+
+.markdown-body input {
+  overflow: visible;
+}
+
+.markdown-body [type=checkbox] {
+  box-sizing: border-box;
+  padding: 0;
+}
+
+.markdown-body * {
+  box-sizing: border-box;
+}
+
+.markdown-body input {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.markdown-body a {
+  color: #0366d6;
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+.markdown-body strong {
+  font-weight: 600;
+}
+
+.markdown-body hr {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #dfe2e5;
+  height: 0;
+  margin: 15px 0;
+  overflow: hidden;
+}
+
+.markdown-body hr:before {
+  content: "";
+  display: table;
+}
+
+.markdown-body hr:after {
+  clear: both;
+  content: "";
+  display: table;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+.markdown-body td,
+.markdown-body th {
+  padding: 0;
+}
+
+.markdown-body details summary {
+  cursor: pointer;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin-bottom: 0;
+  margin-top: 0;
+}
+
+.markdown-body h1 {
+  font-size: 32px;
+}
+
+.markdown-body h1,
+.markdown-body h2 {
+  font-weight: 600;
+}
+
+.markdown-body h2 {
+  font-size: 24px;
+}
+
+.markdown-body h3 {
+  font-size: 20px;
+}
+
+.markdown-body h3,
+.markdown-body h4 {
+  font-weight: 600;
+}
+
+.markdown-body h4 {
+  font-size: 16px;
+}
+
+.markdown-body h5 {
+  font-size: 14px;
+}
+
+.markdown-body h5,
+.markdown-body h6 {
+  font-weight: 600;
+}
+
+.markdown-body h6 {
+  font-size: 12px;
+}
+
+.markdown-body p {
+  margin-bottom: 10px;
+  margin-top: 0;
+}
+
+.markdown-body blockquote {
+  margin: 0;
+}
+
+.markdown-body ol,
+.markdown-body ul {
+  margin-bottom: 0;
+  margin-top: 0;
+  padding-left: 0;
+}
+
+.markdown-body ol ol,
+.markdown-body ul ol {
+  list-style-type: lower-roman;
+}
+
+.markdown-body ol ol ol,
+.markdown-body ol ul ol,
+.markdown-body ul ol ol,
+.markdown-body ul ul ol {
+  list-style-type: lower-alpha;
+}
+
+.markdown-body dd {
+  margin-left: 0;
+}
+
+.markdown-body code,
+.markdown-body pre {
+  font-family: SFMono-Regular,Consolas,Liberation Mono,Menlo,Courier,monospace;
+  font-size: 12px;
+}
+
+.markdown-body pre {
+  margin-bottom: 0;
+  margin-top: 0;
+}
+
+.markdown-body input::-webkit-inner-spin-button,
+.markdown-body input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+
+.markdown-body .border {
+  border: 1px solid #e1e4e8!important;
+}
+
+.markdown-body .border-0 {
+  border: 0!important;
+}
+
+.markdown-body .border-bottom {
+  border-bottom: 1px solid #e1e4e8!important;
+}
+
+.markdown-body .rounded-1 {
+  border-radius: 3px!important;
+}
+
+.markdown-body .bg-white {
+  background-color: #fff!important;
+}
+
+.markdown-body .bg-gray-light {
+  background-color: #fafbfc!important;
+}
+
+.markdown-body .text-gray-light {
+  color: #6a737d!important;
+}
+
+.markdown-body .mb-0 {
+  margin-bottom: 0!important;
+}
+
+.markdown-body .my-2 {
+  margin-bottom: 8px!important;
+  margin-top: 8px!important;
+}
+
+.markdown-body .pl-0 {
+  padding-left: 0!important;
+}
+
+.markdown-body .py-0 {
+  padding-bottom: 0!important;
+  padding-top: 0!important;
+}
+
+.markdown-body .pl-1 {
+  padding-left: 4px!important;
+}
+
+.markdown-body .pl-2 {
+  padding-left: 8px!important;
+}
+
+.markdown-body .py-2 {
+  padding-bottom: 8px!important;
+  padding-top: 8px!important;
+}
+
+.markdown-body .pl-3,
+.markdown-body .px-3 {
+  padding-left: 16px!important;
+}
+
+.markdown-body .px-3 {
+  padding-right: 16px!important;
+}
+
+.markdown-body .pl-4 {
+  padding-left: 24px!important;
+}
+
+.markdown-body .pl-5 {
+  padding-left: 32px!important;
+}
+
+.markdown-body .pl-6 {
+  padding-left: 40px!important;
+}
+
+.markdown-body .f6 {
+  font-size: 12px!important;
+}
+
+.markdown-body .lh-condensed {
+  line-height: 1.25!important;
+}
+
+.markdown-body .text-bold {
+  font-weight: 600!important;
+}
+
+.markdown-body:before {
+  content: "";
+  display: table;
+}
+
+.markdown-body:after {
+  clear: both;
+  content: "";
+  display: table;
+}
+
+.markdown-body>:first-child {
+  margin-top: 0!important;
+}
+
+.markdown-body>:last-child {
+  margin-bottom: 0!important;
+}
+
+.markdown-body a:not([href]) {
+  color: inherit;
+  text-decoration: none;
+}
+
+.markdown-body blockquote,
+.markdown-body dl,
+.markdown-body ol,
+.markdown-body p,
+.markdown-body pre,
+.markdown-body table,
+.markdown-body ul {
+  margin-bottom: 16px;
+  margin-top: 0;
+}
+
+.markdown-body hr {
+  background-color: #e1e4e8;
+  border: 0;
+  height: .25em;
+  margin: 24px 0;
+  padding: 0;
+}
+
+.markdown-body blockquote {
+  border-left: .25em solid #dfe2e5;
+  color: #6a737d;
+  padding: 0 1em;
+}
+
+.markdown-body blockquote>:first-child {
+  margin-top: 0;
+}
+
+.markdown-body blockquote>:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body kbd {
+  background-color: #fafbfc;
+  border: 1px solid #c6cbd1;
+  border-bottom-color: #959da5;
+  border-radius: 3px;
+  box-shadow: inset 0 -1px 0 #959da5;
+  color: #444d56;
+  display: inline-block;
+  font-size: 11px;
+  line-height: 10px;
+  padding: 3px 5px;
+  vertical-align: middle;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin-bottom: 16px;
+  margin-top: 24px;
+}
+
+.markdown-body h1 {
+  font-size: 2em;
+}
+
+.markdown-body h1,
+.markdown-body h2 {
+  border-bottom: 1px solid #eaecef;
+  padding-bottom: .3em;
+}
+
+.markdown-body h2 {
+  font-size: 1.5em;
+}
+
+.markdown-body h3 {
+  font-size: 1.25em;
+}
+
+.markdown-body h4 {
+  font-size: 1em;
+}
+
+.markdown-body h5 {
+  font-size: .875em;
+}
+
+.markdown-body h6 {
+  color: #6a737d;
+  font-size: .85em;
+}
+
+.markdown-body ol,
+.markdown-body ul {
+  padding-left: 2em;
+}
+
+.markdown-body ol ol,
+.markdown-body ol ul,
+.markdown-body ul ol,
+.markdown-body ul ul {
+  margin-bottom: 0;
+  margin-top: 0;
+}
+
+.markdown-body li {
+  word-wrap: break-all;
+}
+
+.markdown-body li>p {
+  margin-top: 16px;
+}
+
+.markdown-body li+li {
+  margin-top: .25em;
+}
+
+.markdown-body dl {
+  padding: 0;
+}
+
+.markdown-body dl dt {
+  font-size: 1em;
+  font-style: italic;
+  font-weight: 600;
+  margin-top: 16px;
+  padding: 0;
+}
+
+.markdown-body dl dd {
+  margin-bottom: 16px;
+  padding: 0 16px;
+}
+
+.markdown-body table {
+  display: block;
+  overflow: auto;
+  width: 100%;
+}
+
+.markdown-body table th {
+  font-weight: 600;
+}
+
+.markdown-body table td,
+.markdown-body table th {
+  border: 1px solid #dfe2e5;
+  padding: 6px 13px;
+}
+
+.markdown-body table tr {
+  background-color: #fff;
+  border-top: 1px solid #c6cbd1;
+}
+
+.markdown-body table tr:nth-child(2n) {
+  background-color: #f6f8fa;
+}
+
+.markdown-body img {
+  background-color: #fff;
+  box-sizing: content-box;
+  max-width: 100%;
+}
+
+.markdown-body img[align=right] {
+  padding-left: 20px;
+}
+
+.markdown-body img[align=left] {
+  padding-right: 20px;
+}
+
+.markdown-body code {
+  background-color: rgba(27,31,35,.05);
+  border-radius: 3px;
+  font-size: 85%;
+  margin: 0;
+  padding: .2em .4em;
+}
+
+.markdown-body pre {
+  word-wrap: normal;
+}
+
+.markdown-body pre>code {
+  background: transparent;
+  border: 0;
+  font-size: 100%;
+  margin: 0;
+  padding: 0;
+  white-space: pre;
+  word-break: normal;
+}
+
+.markdown-body .highlight {
+  margin-bottom: 16px;
+}
+
+.markdown-body .highlight pre {
+  margin-bottom: 0;
+  word-break: normal;
+}
+
+.markdown-body .highlight pre,
+.markdown-body pre {
+  background-color: #f6f8fa;
+  border-radius: 3px;
+  font-size: 85%;
+  line-height: 1.45;
+  overflow: auto;
+  padding: 16px;
+}
+
+.markdown-body pre code {
+  background-color: transparent;
+  border: 0;
+  display: inline;
+  line-height: inherit;
+  margin: 0;
+  max-width: auto;
+  overflow: visible;
+  padding: 0;
+  word-wrap: normal;
+}
+
+.markdown-body .commit-tease-sha {
+  color: #444d56;
+  display: inline-block;
+  font-family: SFMono-Regular,Consolas,Liberation Mono,Menlo,Courier,monospace;
+  font-size: 90%;
+}
+
+.markdown-body .blob-wrapper {
+  border-bottom-left-radius: 3px;
+  border-bottom-right-radius: 3px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.markdown-body .blob-wrapper-embedded {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.markdown-body .blob-num {
+  -moz-user-select: none;
+  -ms-user-select: none;
+  -webkit-user-select: none;
+  color: rgba(27,31,35,.3);
+  cursor: pointer;
+  font-family: SFMono-Regular,Consolas,Liberation Mono,Menlo,Courier,monospace;
+  font-size: 12px;
+  line-height: 20px;
+  min-width: 50px;
+  padding-left: 10px;
+  padding-right: 10px;
+  text-align: right;
+  user-select: none;
+  vertical-align: top;
+  white-space: nowrap;
+  width: 1%;
+}
+
+.markdown-body .blob-num:hover {
+  color: rgba(27,31,35,.6);
+}
+
+.markdown-body .blob-num:before {
+  content: attr(data-line-number);
+}
+
+.markdown-body .blob-code {
+  line-height: 20px;
+  padding-left: 10px;
+  padding-right: 10px;
+  position: relative;
+  vertical-align: top;
+}
+
+.markdown-body .blob-code-inner {
+  color: #24292e;
+  font-family: SFMono-Regular,Consolas,Liberation Mono,Menlo,Courier,monospace;
+  font-size: 12px;
+  overflow: visible;
+  white-space: pre;
+  word-wrap: normal;
+}
+
+.markdown-body .pl-token.active,
+.markdown-body .pl-token:hover {
+  background: #ffea7f;
+  cursor: pointer;
+}
+
+.markdown-body kbd {
+  background-color: #fafbfc;
+  border: 1px solid #d1d5da;
+  border-bottom-color: #c6cbd1;
+  border-radius: 3px;
+  box-shadow: inset 0 -1px 0 #c6cbd1;
+  color: #444d56;
+  display: inline-block;
+  font: 11px SFMono-Regular,Consolas,Liberation Mono,Menlo,Courier,monospace;
+  line-height: 10px;
+  padding: 3px 5px;
+  vertical-align: middle;
+}
+
+.markdown-body :checked+.radio-label {
+  border-color: #0366d6;
+  position: relative;
+  z-index: 1;
+}
+
+.markdown-body .tab-size[data-tab-size="1"] {
+  -moz-tab-size: 1;
+  tab-size: 1;
+}
+
+.markdown-body .tab-size[data-tab-size="2"] {
+  -moz-tab-size: 2;
+  tab-size: 2;
+}
+
+.markdown-body .tab-size[data-tab-size="3"] {
+  -moz-tab-size: 3;
+  tab-size: 3;
+}
+
+.markdown-body .tab-size[data-tab-size="4"] {
+  -moz-tab-size: 4;
+  tab-size: 4;
+}
+
+.markdown-body .tab-size[data-tab-size="5"] {
+  -moz-tab-size: 5;
+  tab-size: 5;
+}
+
+.markdown-body .tab-size[data-tab-size="6"] {
+  -moz-tab-size: 6;
+  tab-size: 6;
+}
+
+.markdown-body .tab-size[data-tab-size="7"] {
+  -moz-tab-size: 7;
+  tab-size: 7;
+}
+
+.markdown-body .tab-size[data-tab-size="8"] {
+  -moz-tab-size: 8;
+  tab-size: 8;
+}
+
+.markdown-body .tab-size[data-tab-size="9"] {
+  -moz-tab-size: 9;
+  tab-size: 9;
+}
+
+.markdown-body .tab-size[data-tab-size="10"] {
+  -moz-tab-size: 10;
+  tab-size: 10;
+}
+
+.markdown-body .tab-size[data-tab-size="11"] {
+  -moz-tab-size: 11;
+  tab-size: 11;
+}
+
+.markdown-body .tab-size[data-tab-size="12"] {
+  -moz-tab-size: 12;
+  tab-size: 12;
+}
+
+.markdown-body .task-list-item {
+  list-style-type: none;
+}
+
+.markdown-body .task-list-item+.task-list-item {
+  margin-top: 3px;
+}
+
+.markdown-body .task-list-item input {
+  margin: 0 .2em .25em -1.6em;
+  vertical-align: middle;
+}
+
+.markdown-body hr {
+  border-bottom-color: #eee;
+}
+
+.markdown-body .pl-0 {
+  padding-left: 0!important;
+}
+
+.markdown-body .pl-1 {
+  padding-left: 4px!important;
+}
+
+.markdown-body .pl-2 {
+  padding-left: 8px!important;
+}
+
+.markdown-body .pl-3 {
+  padding-left: 16px!important;
+}
+
+.markdown-body .pl-4 {
+  padding-left: 24px!important;
+}
+
+.markdown-body .pl-5 {
+  padding-left: 32px!important;
+}
+
+.markdown-body .pl-6 {
+  padding-left: 40px!important;
+}
+
+.markdown-body .pl-7 {
+  padding-left: 48px!important;
+}
+
+.markdown-body .pl-8 {
+  padding-left: 64px!important;
+}
+
+.markdown-body .pl-9 {
+  padding-left: 80px!important;
+}
+
+.markdown-body .pl-10 {
+  padding-left: 96px!important;
+}
+
+.markdown-body .pl-11 {
+  padding-left: 112px!important;
+}
+
+.markdown-body .pl-12 {
+  padding-left: 128px!important;
+}
+
+/*# sourceURL=webpack://./node_modules/github-markdown-css/github-markdown.css */
+/*# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIndlYnBhY2s6Ly8uL25vZGVfbW9kdWxlcy9naXRodWItbWFya2Rvd24tY3NzL2dpdGh1Yi1tYXJrZG93bi5jc3MiXSwibmFtZXMiOltdLCJtYXBwaW5ncyI6IkFBQUE7RUFDRSwwQkFBMEI7RUFDMUIsMkRBQXF0RTtBQUN2dEU7O0FBRUE7RUFDRSxxQkFBcUI7RUFDckIsa0JBQWtCO0VBQ2xCLDJCQUEyQjtBQUM3Qjs7QUFFQTtFQUNFLFdBQVc7RUFDWCxjQUFjO0VBQ2Qsa0JBQWtCO0VBQ2xCLGtCQUFrQjtBQUNwQjs7QUFFQTtFQUNFLGFBQWE7QUFDZjs7QUFFQTs7Ozs7O0VBTUUsY0FBYztFQUNkLHNCQUFzQjtFQUN0QixrQkFBa0I7QUFDcEI7O0FBRUE7Ozs7OztFQU1FLHFCQUFxQjtBQUN2Qjs7QUFFQTs7Ozs7O0VBTUUsbUJBQW1CO0FBQ3JCOztBQUVBO0VBQ0UsMEJBQTBCO0VBQzFCLDhCQUE4QjtFQUM5QixjQUFjO0VBQ2QsZ0JBQWdCO0VBQ2hCLGtJQUFrSTtFQUNsSSxlQUFlO0VBQ2YsZ0JBQWdCO0VBQ2hCLHFCQUFxQjtBQUN2Qjs7QUFFQTtFQUNFLGNBQWM7QUFDaEI7O0FBRUE7O0VBRUUsY0FBYztBQUNoQjs7QUFFQTs7RUFFRSxjQUFjO0FBQ2hCOztBQUVBOztFQUVFLGNBQWM7QUFDaEI7O0FBRUE7RUFDRSxjQUFjO0FBQ2hCOztBQUVBO0VBQ0UsY0FBYztBQUNoQjs7QUFFQTs7Ozs7OztFQU9FLGNBQWM7QUFDaEI7O0FBRUE7O0VBRUUsY0FBYztBQUNoQjs7QUFFQTtFQUNFLGNBQWM7QUFDaEI7O0FBRUE7RUFDRSx5QkFBeUI7RUFDekIsY0FBYztBQUNoQjs7QUFFQTtFQUNFLHlCQUF5QjtFQUN6QixjQUFjO0FBQ2hCOztBQUVBO0VBQ0UsYUFBYTtBQUNmOztBQUVBO0VBQ0UsY0FBYztFQUNkLGdCQUFnQjtBQUNsQjs7QUFFQTtFQUNFLGNBQWM7QUFDaEI7O0FBRUE7OztFQUdFLGNBQWM7RUFDZCxnQkFBZ0I7QUFDbEI7O0FBRUE7RUFD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 */
+  </style>
+  <style>
+  /**
+ * prism.js default theme for JavaScript, CSS and HTML
+ * Based on dabblet (http://dabblet.com)
+ * @author Lea Verou
+ */
+
+code[class*="language-"],
+pre[class*="language-"] {
+	color: black;
+	background: none;
+	text-shadow: 0 1px white;
+	font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+	font-size: 1em;
+	text-align: left;
+	white-space: pre;
+	word-spacing: normal;
+	word-break: normal;
+	word-wrap: normal;
+	line-height: 1.5;
+
+	-moz-tab-size: 4;
+	-o-tab-size: 4;
+	tab-size: 4;
+
+	-webkit-hyphens: none;
+	-moz-hyphens: none;
+	-ms-hyphens: none;
+	hyphens: none;
+}
+
+pre[class*="language-"]::-moz-selection, pre[class*="language-"] ::-moz-selection,
+code[class*="language-"]::-moz-selection, code[class*="language-"] ::-moz-selection {
+	text-shadow: none;
+	background: #b3d4fc;
+}
+
+pre[class*="language-"]::selection, pre[class*="language-"] ::selection,
+code[class*="language-"]::selection, code[class*="language-"] ::selection {
+	text-shadow: none;
+	background: #b3d4fc;
+}
+
+@media print {
+	code[class*="language-"],
+	pre[class*="language-"] {
+		text-shadow: none;
+	}
+}
+
+/* Code blocks */
+pre[class*="language-"] {
+	padding: 1em;
+	margin: .5em 0;
+	overflow: auto;
+}
+
+:not(pre) > code[class*="language-"],
+pre[class*="language-"] {
+	background: #f5f2f0;
+}
+
+/* Inline code */
+:not(pre) > code[class*="language-"] {
+	padding: .1em;
+	border-radius: .3em;
+	white-space: normal;
+}
+
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+	color: slategray;
+}
+
+.token.punctuation {
+	color: #999;
+}
+
+.token.namespace {
+	opacity: .7;
+}
+
+.token.property,
+.token.tag,
+.token.boolean,
+.token.number,
+.token.constant,
+.token.symbol,
+.token.deleted {
+	color: #905;
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+	color: #690;
+}
+
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+	color: #9a6e3a;
+	/* This background color was intended by the author of this theme. */
+	background: hsla(0, 0%, 100%, .5);
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+	color: #07a;
+}
+
+.token.function,
+.token.class-name {
+	color: #DD4A68;
+}
+
+.token.regex,
+.token.important,
+.token.variable {
+	color: #e90;
+}
+
+.token.important,
+.token.bold {
+	font-weight: bold;
+}
+.token.italic {
+	font-style: italic;
+}
+
+.token.entity {
+	cursor: help;
+}
+
+/*# sourceURL=webpack://./node_modules/prismjs/themes/prism.css */
+/*# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIndlYnBhY2s6Ly8uL25vZGVfbW9kdWxlcy9wcmlzbWpzL3RoZW1lcy9wcmlzbS5jc3MiXSwibmFtZXMiOltdLCJtYXBwaW5ncyI6IkFBQUE7Ozs7RUFJRTs7QUFFRjs7Q0FFQyxZQUFZO0NBQ1osZ0JBQWdCO0NBQ2hCLHdCQUF3QjtDQUN4QixzRUFBc0U7Q0FDdEUsY0FBYztDQUNkLGdCQUFnQjtDQUNoQixnQkFBZ0I7Q0FDaEIsb0JBQW9CO0NBQ3BCLGtCQUFrQjtDQUNsQixpQkFBaUI7Q0FDakIsZ0JBQWdCOztDQUVoQixnQkFBZ0I7Q0FDaEIsY0FBYztDQUNkLFdBQVc7O0NBRVgscUJBQXFCO0NBQ3JCLGtCQUFrQjtDQUNsQixpQkFBaUI7Q0FDakIsYUFBYTtBQUNkOztBQUVBOztDQUVDLGlCQUFpQjtDQUNqQixtQkFBbUI7QUFDcEI7O0FBRUE7O0NBRUMsaUJBQWlCO0NBQ2pCLG1CQUFtQjtBQUNwQjs7QUFFQTtDQUNDOztFQUVDLGlCQUFpQjtDQUNsQjtBQUNEOztBQUVBLGdCQUFnQjtBQUNoQjtDQUNDLFlBQVk7Q0FDWixjQUFjO0NBQ2QsY0FBYztBQUNmOztBQUVBOztDQUVDLG1CQUFtQjtBQUNwQjs7QUFFQSxnQkFBZ0I7QUFDaEI7Q0FDQyxhQUFhO0NBQ2IsbUJBQW1CO0NBQ25CLG1CQUFtQjtBQUNwQjs7QUFFQTs7OztDQUlDLGdCQUFnQjtBQUNqQjs7QUFFQTtDQUNDLFdBQVc7QUFDWjs7QUFFQTtDQUNDLFdBQVc7QUFDWjs7QUFFQTs7Ozs7OztDQU9DLFdBQVc7QUFDWjs7QUFFQTs7Ozs7O0NBTUMsV0FBVztBQUNaOztBQUVBOzs7OztDQUtDLGNBQWM7Q0FDZCxvRUFBb0U7Q0FDcEUsaUNBQWlDO0FBQ2xDOztBQUVBOzs7Q0FHQyxXQUFXO0FBQ1o7O0FBRUE7O0NBRUMsY0FBYztBQUNmOztBQUVBOzs7Q0FHQyxXQUFXO0FBQ1o7O0FBRUE7O0NBRUMsaUJBQWlCO0FBQ2xCO0FBQ0E7Q0FDQyxrQkFBa0I7QUFDbkI7O0FBRUE7Q0FDQyxZQUFZO0FBQ2IiLCJzb3VyY2VSb290IjoiIn0= */
+  </style>
+  <style>
+  
+  </style>
+  <style>
+    .markdown-body {
+      font-family: -apple-system,Segoe UI,Helvetica,Arial,sans-serif,Apple Color Emoji,Segoe UI Emoji;
+      box-sizing: border-box;
+      min-width: 200px;
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 45px;
+    }
+
+    @media not print {
+      .markdown-body {
+        padding: 45px;
+      }
+
+      @media (max-width: 767px) {
+        .markdown-body {
+          padding: 15px;
+        }
+      }
+    }
+
+    .hf-container {
+      color: #24292e;
+      line-height: 1.3;
+    }
+
+    .markdown-body .highlight pre,
+    .markdown-body pre {
+      white-space: pre-wrap;
+    }
+    .markdown-body table {
+      display: table;
+    }
+    .markdown-body img[data-align="center"] {
+      display: block;
+      margin: 0 auto;
+    }
+    .markdown-body img[data-align="right"] {
+      display: block;
+      margin: 0 0 0 auto;
+    }
+    .markdown-body li.task-list-item {
+      list-style-type: none;
+    }
+    .markdown-body li > [type=checkbox] {
+      margin: 0 0 0 -1.3em;
+    }
+    .markdown-body input[type="checkbox"] ~ p {
+      margin-top: 0;
+      display: inline-block;
+    }
+    .markdown-body ol ol,
+    .markdown-body ul ol {
+      list-style-type: decimal;
+    }
+    .markdown-body ol ol ol,
+    .markdown-body ol ul ol,
+    .markdown-body ul ol ol,
+    .markdown-body ul ul ol {
+      list-style-type: decimal;
+    }
+  </style>
+  <style>.markdown-body a.footnote-ref {
+  text-decoration: none;
+}
+
+.footnotes {
+  font-size: .85em;
+  opacity: .8;
+}
+
+.footnotes li[role="doc-endnote"] {
+  position: relative;
+}
+
+.footnotes .footnote-back {
+  position: absolute;
+  font-family: initial;
+  top: .2em;
+  right: 1em;
+  text-decoration: none;
+}
+
+.inline-math.invalid,
+.multiple-math.invalid {
+  color: rgb(255, 105, 105);
+}
+
+.toc-container {
+  width: 100%;
+}
+
+.toc-container .toc-title {
+  font-weight: 700;
+  font-size: 1.2em;
+  margin-bottom: 0;
+}
+
+.toc-container li,
+.toc-container ul,
+.toc-container ul li {
+  list-style: none !important;
+}
+
+.toc-container > ul {
+  padding-left: 0;
+}
+
+.toc-container ul li span {
+  display : flex;
+}
+
+.toc-container ul li span a {
+  color: inherit;
+  text-decoration: none;
+}
+.toc-container ul li span a:hover {
+  color: inherit;
+  text-decoration: none;
+}
+
+.toc-container ul li span span.dots {
+  flex: 1;
+  height: 0.65em;
+  margin: 0 10px;
+  border-bottom: 2px dotted black;
+}
+
+/*# sourceURL=webpack://./src/muya/lib/assets/styles/exportStyle.css */
+/*# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIndlYnBhY2s6Ly8uL3NyYy9tdXlhL2xpYi9hc3NldHMvc3R5bGVzL2V4cG9ydFN0eWxlLmNzcyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiQUFBQTtFQUNFLHFCQUFxQjtBQUN2Qjs7QUFFQTtFQUNFLGdCQUFnQjtFQUNoQixXQUFXO0FBQ2I7O0FBRUE7RUFDRSxrQkFBa0I7QUFDcEI7O0FBRUE7RUFDRSxrQkFBa0I7RUFDbEIsb0JBQW9CO0VBQ3BCLFNBQVM7RUFDVCxVQUFVO0VBQ1YscUJBQXFCO0FBQ3ZCOztBQUVBOztFQUVFLHlCQUF5QjtBQUMzQjs7QUFFQTtFQUNFLFdBQVc7QUFDYjs7QUFFQTtFQUNFLGdCQUFnQjtFQUNoQixnQkFBZ0I7RUFDaEIsZ0JBQWdCO0FBQ2xCOztBQUVBOzs7RUFHRSwyQkFBMkI7QUFDN0I7O0FBRUE7RUFDRSxlQUFlO0FBQ2pCOztBQUVBO0VBQ0UsY0FBYztBQUNoQjs7QUFFQTtFQUNFLGNBQWM7RUFDZCxxQkFBcUI7QUFDdkI7QUFDQTtFQUNFLGNBQWM7RUFDZCxxQkFBcUI7QUFDdkI7O0FBRUE7RUFDRSxPQUFPO0VBQ1AsY0FBYztFQUNkLGNBQWM7RUFDZCwrQkFBK0I7QUFDakMiLCJzb3VyY2VSb290IjoiIn0= */</style>
+  <style>.markdown-body{}body {counter-reset: h2}
+h2 {counter-reset: h3}
+h3 {counter-reset: h4}
+h4 {counter-reset: h5}
+h5 {counter-reset: h6}
+h2:before {counter-increment: h2; content: counter(h2) ". "}
+h3:before {counter-increment: h3; content: counter(h2) "." counter(h3) ". "}
+h4:before {counter-increment: h4; content: counter(h2) "." counter(h3) "." counter(h4) ". "}
+h5:before {counter-increment: h5; content: counter(h2) "." counter(h3) "." counter(h4) "." counter(h5) ". "}
+h6:before {counter-increment: h6; content: counter(h2) "." counter(h3) "." counter(h4) "." counter(h5) "." counter(h6) ". "}
+h2.nocount:before, h3.nocount:before, h4.nocount:before, h5.nocount:before, h6.nocount:before { content: ""; counter-increment: none }/** Academic **/
+
+/* DejaVu Serif should use 11pt */
+.hf-container,
+.markdown-body {
+  font-family: Georgia,Palatino,"Palatino Linotype","Times New Roman","DejaVu Serif",serif,"Apple Color Emoji","Segoe UI Emoji";
+  font-size: 12pt;
+  line-height: 1.3;
+  color: #212121;
+}
+
+:root {
+  --footerHeaderBorderColor: #1c1c1c;
+}
+.hf-container {
+  font-size: 0.75em;
+}
+.page-header:not(.simple) .hf-container {
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--footerHeaderBorderColor);
+}
+.page-footer:not(.simple) .hf-container {
+  padding-top: 2px;
+  border-top: 1px solid var(--footerHeaderBorderColor);
+}
+
+.footnotes {
+  font-size: 0.75em;
+  opacity: 0.9;
+}
+.footnotes > hr:first-of-type {
+  width: 250px;
+  height: 1px;
+  background: var(--footerHeaderBorderColor);
+}
+.footnotes > ol > li > p {
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  font-weight: 600;
+  color: #282828;
+}
+
+.markdown-body h1 {
+  font-size: 1.8em;
+}
+.markdown-body h2 {
+  font-size: 1.6em;
+}
+.markdown-body h3 {
+  font-size: 1.4em;
+}
+.markdown-body h4,
+.markdown-body h5 {
+  font-size: 1.2em;
+}
+.markdown-body h6 {
+  font-size: 1em;
+}
+
+.markdown-body h1,
+.markdown-body h2 {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.markdown-body a {
+  color: #212121;
+  text-decoration: underline;
+}
+
+.markdown-body hr {
+  background-color: #b0b0b0;
+  height: 1px;
+}
+
+.markdown-body blockquote {
+  border: none;
+  color: #282828;
+  padding: 0 1em;
+  margin-left: 20px;
+}
+
+.markdown-body .highlight pre,
+.markdown-body pre {
+  background-color: #f6f8fa;
+  border: 1px solid #e5e5e5;
+  border-radius: 0;
+}
+
+.markdown-body table td,
+.markdown-body table th {
+  border: 1px solid #1a1a1a;
+  padding: 2px 6px;
+}
+.markdown-body table tr {
+  background: none;
+  border-top: 1px solid #1a1a1a;
+  text-align: left;
+}
+.markdown-body table tr:nth-child(2n) {
+  background: none;
+}
+
+/*# sourceURL=webpack://./src/renderer/assets/themes/export/academic.theme.css */
+/*# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIndlYnBhY2s6Ly8uL3NyYy9yZW5kZXJlci9hc3NldHMvdGhlbWVzL2V4cG9ydC9hY2FkZW1pYy50aGVtZS5jc3MiXSwibmFtZXMiOltdLCJtYXBwaW5ncyI6IkFBQUEsZUFBZTs7QUFFZixpQ0FBaUM7QUFDakM7O0VBRUUsNkhBQTZIO0VBQzdILGVBQWU7RUFDZixnQkFBZ0I7RUFDaEIsY0FBYztBQUNoQjs7QUFFQTtFQUNFLGtDQUFrQztBQUNwQztBQUNBO0VBQ0UsaUJBQWlCO0FBQ25CO0FBQ0E7RUFDRSxtQkFBbUI7RUFDbkIsdURBQXVEO0FBQ3pEO0FBQ0E7RUFDRSxnQkFBZ0I7RUFDaEIsb0RBQW9EO0FBQ3REOztBQUVBO0VBQ0UsaUJBQWlCO0VBQ2pCLFlBQVk7QUFDZDtBQUNBO0VBQ0UsWUFBWTtFQUNaLFdBQVc7RUFDWCwwQ0FBMEM7QUFDNUM7QUFDQTtFQUNFLGVBQWU7RUFDZixrQkFBa0I7QUFDcEI7O0FBRUE7Ozs7OztFQU1FLGdCQUFnQjtFQUNoQixjQUFjO0FBQ2hCOztBQUVBO0VBQ0UsZ0JBQWdCO0FBQ2xCO0FBQ0E7RUFDRSxnQkFBZ0I7QUFDbEI7QUFDQTtFQUNFLGdCQUFnQjtBQUNsQjtBQUNBOztFQUVFLGdCQUFnQjtBQUNsQjtBQUNBO0VBQ0UsY0FBYztBQUNoQjs7QUFFQTs7RUFFRSxtQkFBbUI7RUFDbkIsaUJBQWlCO0FBQ25COztBQUVBO0VBQ0UsY0FBYztFQUNkLDBCQUEwQjtBQUM1Qjs7QUFFQTtFQUNFLHlCQUF5QjtFQUN6QixXQUFXO0FBQ2I7O0FBRUE7RUFDRSxZQUFZO0VBQ1osY0FBYztFQUNkLGNBQWM7RUFDZCxpQkFBaUI7QUFDbkI7O0FBRUE7O0VBRUUseUJBQXlCO0VBQ3pCLHlCQUF5QjtFQUN6QixnQkFBZ0I7QUFDbEI7O0FBRUE7O0VBRUUseUJBQXlCO0VBQ3pCLGdCQUFnQjtBQUNsQjtBQUNBO0VBQ0UsZ0JBQWdCO0VBQ2hCLDZCQUE2QjtFQUM3QixnQkFBZ0I7QUFDbEI7QUFDQTtFQUNFLGdCQUFnQjtBQUNsQiIsInNvdXJjZVJvb3QiOiIifQ== */</style>
+</head>
+<body>
+  <article class="markdown-body"><h1 class="atx" id="event-driven-architecture-is-not-event-sourcing-a-necessary-distinction">Event-Driven Architecture Is Not Event Sourcing: A Necessary Distinction</h1>
+<p>There's a peculiar phenomenon in our industry. When someone says "we're building an event-driven system," I've learned to ask a follow-up question: "What do you mean by that?"</p>
+<p>The answers vary dramatically. Some teams mean they're using a message broker for service communication. Others mean they're storing every state change as an immutable event. Still others mean both—often without realising these are fundamentally different architectural decisions with vastly different implications.</p>
+<p>This conflation causes real harm. Teams adopt Event Sourcing because they want the benefits of Event-Driven Architecture, only to discover they've signed up for complexity they never needed. Let me try to untangle these concepts.</p>
+<hr>
+<h2 class="atx" id="what-event-driven-architecture-actually-is">What Event-Driven Architecture Actually Is</h2>
+<p><strong>Event-Driven Architecture (EDA)</strong> is a communication pattern. It describes how components in a system talk to each other. </p>
+<p>In a traditional request-response model, Service A calls Service B directly and waits for an answer. They're coupled in time and in knowledge—A must know where B lives and what it expects.</p>
+<p>In an event-driven model, something different happens:</p>
+<div class="mermaid" data-processed="true"><svg id="mermaid-1764135632789" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" height="338.123291015625" style="max-width: 613.3972778320312px;" viewBox="0 0 613.3972778320312 338.123291015625"><style>#mermaid-1764135632789 {font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#333;}#mermaid-1764135632789 .error-icon{fill:#552222;}#mermaid-1764135632789 .error-text{fill:#552222;stroke:#552222;}#mermaid-1764135632789 .edge-thickness-normal{stroke-width:2px;}#mermaid-1764135632789 .edge-thickness-thick{stroke-width:3.5px;}#mermaid-1764135632789 .edge-pattern-solid{stroke-dasharray:0;}#mermaid-1764135632789 .edge-pattern-dashed{stroke-dasharray:3;}#mermaid-1764135632789 .edge-pattern-dotted{stroke-dasharray:2;}#mermaid-1764135632789 .marker{fill:#333333;stroke:#333333;}#mermaid-1764135632789 .marker.cross{stroke:#333333;}#mermaid-1764135632789 svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#mermaid-1764135632789 .label{font-family:"trebuchet ms",verdana,arial,sans-serif;color:#333;}#mermaid-1764135632789 .cluster-label text{fill:#333;}#mermaid-1764135632789 .cluster-label span{color:#333;}#mermaid-1764135632789 .label text,#mermaid-1764135632789 span{fill:#333;color:#333;}#mermaid-1764135632789 .node rect,#mermaid-1764135632789 .node circle,#mermaid-1764135632789 .node ellipse,#mermaid-1764135632789 .node polygon,#mermaid-1764135632789 .node path{fill:#ECECFF;stroke:#9370DB;stroke-width:1px;}#mermaid-1764135632789 .node .label{text-align:center;}#mermaid-1764135632789 .node.clickable{cursor:pointer;}#mermaid-1764135632789 .arrowheadPath{fill:#333333;}#mermaid-1764135632789 .edgePath .path{stroke:#333333;stroke-width:2.0px;}#mermaid-1764135632789 .flowchart-link{stroke:#333333;fill:none;}#mermaid-1764135632789 .edgeLabel{background-color:#e8e8e8;text-align:center;}#mermaid-1764135632789 .edgeLabel rect{opacity:0.5;background-color:#e8e8e8;fill:#e8e8e8;}#mermaid-1764135632789 .cluster rect{fill:#ffffde;stroke:#aaaa33;stroke-width:1px;}#mermaid-1764135632789 .cluster text{fill:#333;}#mermaid-1764135632789 .cluster span{color:#333;}#mermaid-1764135632789 div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:12px;background:hsl(80, 100%, 96.2745098039%);border:1px solid #aaaa33;border-radius:2px;pointer-events:none;z-index:100;}#mermaid-1764135632789 :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g transform="translate(0, 0)"><marker id="flowchart-pointEnd" class="marker flowchart" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-pointStart" class="marker flowchart" viewBox="0 0 10 10" refX="0" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-circleEnd" class="marker flowchart" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-circleStart" class="marker flowchart" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-crossEnd" class="marker cross flowchart" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-crossStart" class="marker cross flowchart" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><g class="root"><g class="clusters"></g><g class="edgePaths"></g><g class="edgeLabels"></g><g class="nodes"><g class="root" transform="translate(0.5, 0)"><g class="clusters"><g class="cluster default" id="subGraph0"><rect style="" rx="0" ry="0" x="8" y="8" width="597.3972625732422" height="322.12328338623047"></rect><g class="cluster-label" transform="translate(215.5479507446289, 13)"><foreignObject width="182.30136108398438" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Event-Driven Architecture</span></div></foreignObject></g></g></g><g class="edgePaths"><path d="M307.5958938598633,73.42465591430664L307.5958938598633,79.71004406611125C307.5958938598633,85.99543221791585,307.5958938598633,98.56620852152507,307.5958938598633,111.13698482513428C307.5958938598633,123.70776112874348,307.5958938598633,136.2785374323527,307.5958938598633,142.56392558415732L307.5958938598633,148.8493137359619" id="L-A-B-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-A LE-B" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M253.8493194580078,185.00351768089962L230.25913619995117,192.00064782759907C206.66895294189453,198.9977779742985,159.48858642578125,212.99203826769735,135.8984031677246,226.27455656620137C112.30821990966797,239.5570748647054,112.30821990966797,252.1278511683146,112.30821990966797,258.4132393201192L112.30821990966797,264.6986274719238" id="L-B-C-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-B LE-C" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M307.5958938598633,189.27396965026855L307.5958938598633,195.55935780207315C307.5958938598633,201.84474595387778,307.5958938598633,214.41552225748697,307.5958938598633,226.9862985610962C307.5958938598633,239.5570748647054,307.5958938598633,252.1278511683146,307.5958938598633,258.4132393201192L307.5958938598633,264.6986274719238" id="L-B-D-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-B LE-D" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M361.34246826171875,185.07710180765662L384.78310775756836,192.06196793322988C408.22374725341797,199.04683405880314,455.1050262451172,213.01656630994967,478.5456657409668,226.28682058732753C501.9863052368164,239.5570748647054,501.9863052368164,252.1278511683146,501.9863052368164,258.4132393201192L501.9863052368164,264.6986274719238" id="L-B-E-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-B LE-E" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path></g><g class="edgeLabels"><g class="edgeLabel" transform="translate(307.5958938598633, 111.13698482513428)"><g class="label" transform="translate(-44.91095733642578, -12.712328910827637)"><foreignObject width="89.82191467285156" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">OrderPlaced</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(112.30821990966797, 226.9862985610962)"><g class="label" transform="translate(-44.91095733642578, -12.712328910827637)"><foreignObject width="89.82191467285156" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">OrderPlaced</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(307.5958938598633, 226.9862985610962)"><g class="label" transform="translate(-44.91095733642578, -12.712328910827637)"><foreignObject width="89.82191467285156" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">OrderPlaced</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(501.9863052368164, 226.9862985610962)"><g class="label" transform="translate(-44.91095733642578, -12.712328910827637)"><foreignObject width="89.82191467285156" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">OrderPlaced</span></div></foreignObject></g></g></g><g class="nodes"><g class="node default default" id="flowchart-B-1536" transform="translate(307.5958938598633, 169.06164169311523)"><rect class="basic label-container" style="" rx="0" ry="0" x="-53.74657440185547" y="-20.212328910827637" width="107.49314880371094" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-46.24657440185547, -12.712328910827637)"><foreignObject width="92.49314880371094" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Event Broker</span></div></foreignObject></g></g><g class="node default default" id="flowchart-A-1535" transform="translate(307.5958938598633, 53.21232795715332)"><rect class="basic label-container" style="" rx="0" ry="0" x="-56.84931564331055" y="-20.212328910827637" width="113.6986312866211" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-49.34931564331055, -12.712328910827637)"><foreignObject width="98.6986312866211" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Order Service</span></div></foreignObject></g></g><g class="node default default" id="flowchart-C-1538" transform="translate(112.30821990966797, 284.91095542907715)"><rect class="basic label-container" style="" rx="0" ry="0" x="-69.30821990966797" y="-20.212328910827637" width="138.61643981933594" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-61.80821990966797, -12.712328910827637)"><foreignObject width="123.61643981933594" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Inventory Service</span></div></foreignObject></g></g><g class="node default default" id="flowchart-D-1540" transform="translate(307.5958938598633, 284.91095542907715)"><rect class="basic label-container" style="" rx="0" ry="0" x="-75.97945404052734" y="-20.212328910827637" width="151.9589080810547" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-68.47945404052734, -12.712328910827637)"><foreignObject width="136.9589080810547" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Notification Service</span></div></foreignObject></g></g><g class="node default default" id="flowchart-E-1542" transform="translate(501.9863052368164, 284.91095542907715)"><rect class="basic label-container" style="" rx="0" ry="0" x="-68.41095733642578" y="-20.212328910827637" width="136.82191467285156" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-60.91095733642578, -12.712328910827637)"><foreignObject width="121.82191467285156" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Analytics Service</span></div></foreignObject></g></g></g></g></g></g></g></svg></div>
+<p>The Order Service doesn't call the Inventory Service. It simply announces: "An order was placed." Anyone interested can listen. The Order Service neither knows nor cares who's listening. This is the essence of EDA: <strong>decoupled communication through events</strong>. </p>
+<p>Each service maintains its own database. Each service decides independently how to react to events. The event broker (Kafka, RabbitMQ, Amazon SNS) handles the plumbing.</p>
+<hr>
+<h2 class="atx" id="what-event-sourcing-actually-is">What Event Sourcing Actually Is</h2>
+<p><strong>Event Sourcing</strong> is a persistence pattern. It describes how you store data. </p>
+<p>In traditional systems, you store current state. A customer has a balance of €500. When they withdraw €100, you update the balance to €400. The fact that a withdrawal occurred? Lost, unless you explicitly log it elsewhere.</p>
+<p>In Event Sourcing, you don't store current state at all. You store the sequence of events that led to the current state:</p>
+<div class="mermaid" data-processed="true"><svg id="mermaid-1764135632837" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" height="377.6986389160156" style="max-width: 322.46575927734375px;" viewBox="0 0 322.46575927734375 377.6986389160156"><style>#mermaid-1764135632837 {font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#333;}#mermaid-1764135632837 .error-icon{fill:#552222;}#mermaid-1764135632837 .error-text{fill:#552222;stroke:#552222;}#mermaid-1764135632837 .edge-thickness-normal{stroke-width:2px;}#mermaid-1764135632837 .edge-thickness-thick{stroke-width:3.5px;}#mermaid-1764135632837 .edge-pattern-solid{stroke-dasharray:0;}#mermaid-1764135632837 .edge-pattern-dashed{stroke-dasharray:3;}#mermaid-1764135632837 .edge-pattern-dotted{stroke-dasharray:2;}#mermaid-1764135632837 .marker{fill:#333333;stroke:#333333;}#mermaid-1764135632837 .marker.cross{stroke:#333333;}#mermaid-1764135632837 svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#mermaid-1764135632837 .label{font-family:"trebuchet ms",verdana,arial,sans-serif;color:#333;}#mermaid-1764135632837 .cluster-label text{fill:#333;}#mermaid-1764135632837 .cluster-label span{color:#333;}#mermaid-1764135632837 .label text,#mermaid-1764135632837 span{fill:#333;color:#333;}#mermaid-1764135632837 .node rect,#mermaid-1764135632837 .node circle,#mermaid-1764135632837 .node ellipse,#mermaid-1764135632837 .node polygon,#mermaid-1764135632837 .node path{fill:#ECECFF;stroke:#9370DB;stroke-width:1px;}#mermaid-1764135632837 .node .label{text-align:center;}#mermaid-1764135632837 .node.clickable{cursor:pointer;}#mermaid-1764135632837 .arrowheadPath{fill:#333333;}#mermaid-1764135632837 .edgePath .path{stroke:#333333;stroke-width:2.0px;}#mermaid-1764135632837 .flowchart-link{stroke:#333333;fill:none;}#mermaid-1764135632837 .edgeLabel{background-color:#e8e8e8;text-align:center;}#mermaid-1764135632837 .edgeLabel rect{opacity:0.5;background-color:#e8e8e8;fill:#e8e8e8;}#mermaid-1764135632837 .cluster rect{fill:#ffffde;stroke:#aaaa33;stroke-width:1px;}#mermaid-1764135632837 .cluster text{fill:#333;}#mermaid-1764135632837 .cluster span{color:#333;}#mermaid-1764135632837 div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:12px;background:hsl(80, 100%, 96.2745098039%);border:1px solid #aaaa33;border-radius:2px;pointer-events:none;z-index:100;}#mermaid-1764135632837 :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g transform="translate(0, 0)"><marker id="flowchart-pointEnd" class="marker flowchart" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-pointStart" class="marker flowchart" viewBox="0 0 10 10" refX="0" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-circleEnd" class="marker flowchart" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-circleStart" class="marker flowchart" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-crossEnd" class="marker cross flowchart" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-crossStart" class="marker cross flowchart" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><g class="root"><g class="clusters"></g><g class="edgePaths"></g><g class="edgeLabels"></g><g class="nodes"><g class="root" transform="translate(0.5, 0)"><g class="clusters"><g class="cluster default" id="subGraph0"><rect style="" rx="0" ry="0" x="8" y="8" width="306.46575927734375" height="361.69862365722656"></rect><g class="cluster-label" transform="translate(52.28082275390625, 13)"><foreignObject width="217.90411376953125" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Event Sourcing: Deriving State</span></div></foreignObject></g></g></g><g class="edgePaths"><path d="M161.23287963867188,73.42465591430664L161.23287963867188,77.59132258097331C161.23287963867188,81.75798924763997,161.23287963867188,90.09132258097331,161.23287963867188,98.42465591430664C161.23287963867188,106.75798924763997,161.23287963867188,115.09132258097331,161.23287963867188,119.25798924763997L161.23287963867188,123.42465591430664" id="L-E1-E2-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-E1 LE-E2" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M161.23287963867188,163.84931182861328L161.23287963867188,168.01597849527994C161.23287963867188,172.18264516194662,161.23287963867188,180.51597849527994,161.23287963867188,188.84931182861328C161.23287963867188,197.18264516194662,161.23287963867188,205.51597849527994,161.23287963867188,209.68264516194662L161.23287963867188,213.84931182861328" id="L-E2-E3-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-E2 LE-E3" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M161.23287963867188,254.27396774291992L161.23287963867188,258.4406344095866C161.23287963867188,262.60730107625324,161.23287963867188,270.9406344095866,161.23287963867188,279.2739677429199C161.23287963867188,287.60730107625324,161.23287963867188,295.9406344095866,161.23287963867188,300.10730107625324L161.23287963867188,304.2739677429199" id="L-E3-STATE-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-E3 LE-STATE" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default default" id="flowchart-E2-1551" transform="translate(161.23287963867188, 143.63698387145996)"><rect class="basic label-container" style="" rx="0" ry="0" x="-116.46575164794922" y="-20.212328910827637" width="232.93150329589844" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-108.96575164794922, -12.712328910827637)"><foreignObject width="217.93150329589844" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">MoneyDepositedamount: €500</span></div></foreignObject></g></g><g class="node default default" id="flowchart-E1-1550" transform="translate(161.23287963867188, 53.21232795715332)"><rect class="basic label-container" style="" rx="0" ry="0" x="-106.2397232055664" y="-20.212328910827637" width="212.4794464111328" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-98.7397232055664, -12.712328910827637)"><foreignObject width="197.4794464111328" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">AccountCreatedbalance: €0</span></div></foreignObject></g></g><g class="node default default" id="flowchart-E3-1553" transform="translate(161.23287963867188, 234.0616397857666)"><rect class="basic label-container" style="" rx="0" ry="0" x="-118.23287963867188" y="-20.212328910827637" width="236.46575927734375" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-110.73287963867188, -12.712328910827637)"><foreignObject width="221.46575927734375" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">MoneyWithdrawnamount: €100</span></div></foreignObject></g></g><g class="node default default" id="flowchart-STATE-1555" transform="translate(161.23287963867188, 324.48629570007324)"><rect class="basic label-container" style="" rx="0" ry="0" x="-105.34931182861328" y="-20.212328910827637" width="210.69862365722656" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-97.84931182861328, -12.712328910827637)"><foreignObject width="195.69862365722656" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Current Statebalance: €400</span></div></foreignObject></g></g></g></g></g></g></g></svg></div>
+<p>To know the current balance, you replay all events from the beginning. The event stream <em>is</em> the source of truth. </p>
+<p>This is a fundamentally different proposition. EDA is about how services communicate. Event Sourcing is about how a service persists its own data.</p>
+<hr>
+<h2 class="atx" id="the-architectural-picture">The Architectural Picture</h2>
+<p>Let me illustrate how these patterns sit in a system:</p>
+<div class="mermaid" data-processed="true"><svg id="mermaid-1764135632864" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" height="730.6402587890625" style="max-width: 468.79107666015625px;" viewBox="0 0 468.79107666015625 730.6402587890625"><style>#mermaid-1764135632864 {font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#333;}#mermaid-1764135632864 .error-icon{fill:#552222;}#mermaid-1764135632864 .error-text{fill:#552222;stroke:#552222;}#mermaid-1764135632864 .edge-thickness-normal{stroke-width:2px;}#mermaid-1764135632864 .edge-thickness-thick{stroke-width:3.5px;}#mermaid-1764135632864 .edge-pattern-solid{stroke-dasharray:0;}#mermaid-1764135632864 .edge-pattern-dashed{stroke-dasharray:3;}#mermaid-1764135632864 .edge-pattern-dotted{stroke-dasharray:2;}#mermaid-1764135632864 .marker{fill:#333333;stroke:#333333;}#mermaid-1764135632864 .marker.cross{stroke:#333333;}#mermaid-1764135632864 svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#mermaid-1764135632864 .label{font-family:"trebuchet ms",verdana,arial,sans-serif;color:#333;}#mermaid-1764135632864 .cluster-label text{fill:#333;}#mermaid-1764135632864 .cluster-label span{color:#333;}#mermaid-1764135632864 .label text,#mermaid-1764135632864 span{fill:#333;color:#333;}#mermaid-1764135632864 .node rect,#mermaid-1764135632864 .node circle,#mermaid-1764135632864 .node ellipse,#mermaid-1764135632864 .node polygon,#mermaid-1764135632864 .node path{fill:#ECECFF;stroke:#9370DB;stroke-width:1px;}#mermaid-1764135632864 .node .label{text-align:center;}#mermaid-1764135632864 .node.clickable{cursor:pointer;}#mermaid-1764135632864 .arrowheadPath{fill:#333333;}#mermaid-1764135632864 .edgePath .path{stroke:#333333;stroke-width:2.0px;}#mermaid-1764135632864 .flowchart-link{stroke:#333333;fill:none;}#mermaid-1764135632864 .edgeLabel{background-color:#e8e8e8;text-align:center;}#mermaid-1764135632864 .edgeLabel rect{opacity:0.5;background-color:#e8e8e8;fill:#e8e8e8;}#mermaid-1764135632864 .cluster rect{fill:#ffffde;stroke:#aaaa33;stroke-width:1px;}#mermaid-1764135632864 .cluster text{fill:#333;}#mermaid-1764135632864 .cluster span{color:#333;}#mermaid-1764135632864 div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:12px;background:hsl(80, 100%, 96.2745098039%);border:1px solid #aaaa33;border-radius:2px;pointer-events:none;z-index:100;}#mermaid-1764135632864 :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g transform="translate(0, 0)"><marker id="flowchart-pointEnd" class="marker flowchart" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-pointStart" class="marker flowchart" viewBox="0 0 10 10" refX="0" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-circleEnd" class="marker flowchart" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-circleStart" class="marker flowchart" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-crossEnd" class="marker cross flowchart" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-crossStart" class="marker cross flowchart" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><g class="root"><g class="clusters"><g class="cluster default" id="subGraph1"><rect style="" rx="0" ry="0" x="262.18835258483887" y="8" width="198.6027374267578" height="449.80609130859375"></rect><g class="cluster-label" transform="translate(262.18835258483887, 13)"><foreignObject width="198.6027374267578" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Service B - Traditional State</span></div></foreignObject></g></g><g class="cluster default" id="subGraph0"><rect style="" rx="0" ry="0" x="8" y="123.42465591430664" width="237.174654006958" height="599.215612411499"></rect><g class="cluster-label" transform="translate(8.313355445861816, 128.42465591430664)"><foreignObject width="236.54794311523438" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Service A - Using Event Sourcing</span></div></foreignObject></g></g></g><g class="edgePaths"><path d="M130.0993137359619,188.84931182861328L130.0993137359619,193.01597849527994C130.0993137359619,197.18264516194662,130.0993137359619,205.51597849527994,130.0993137359619,216.35218652089438C130.0993137359619,227.1883945465088,130.0993137359619,240.5274772644043,130.0993137359619,247.19701862335205L130.0993137359619,253.8665599822998" id="L-CMD-AGG-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-CMD LE-AGG" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M130.0993137359619,294.29121589660645L130.0993137359619,300.9607572555542C130.0993137359619,307.63029861450195,130.0993137359619,320.96938133239746,130.0993137359619,331.8055893580119C130.0993137359619,342.6417973836263,130.0993137359619,350.97513071695965,130.0993137359619,355.1417973836263L130.0993137359619,359.30846405029297" id="L-AGG-ES-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-AGG LE-ES" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M108.39934549641302,431.6807787527101L105.93895221014562,436.03499751202406C103.47855892387821,440.389216271338,98.55777235134342,449.0976537899658,96.097379065076,459.7372607010844C93.6369857788086,470.37686761220294,93.6369857788086,482.9476439158122,93.6369857788086,495.5184202194214C93.6369857788086,508.0891965230306,93.6369857788086,520.6599728266398,93.6369857788086,526.9453609784445L93.6369857788086,533.230749130249" id="L-ES-PROJ-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-ES LE-PROJ" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M93.6369857788086,573.6554050445557L93.6369857788086,577.8220717112223C93.6369857788086,581.988738377889,93.6369857788086,590.3220717112223,93.6369857788086,598.6554050445557C93.6369857788086,606.988738377889,93.6369857788086,615.3220717112223,93.6369857788086,619.488738377889L93.6369857788086,623.6554050445557" id="L-PROJ-RM-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-PROJ LE-RM" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M361.4897212982178,73.42465591430664L361.4897212982178,77.59132258097331C361.4897212982178,81.75798924763997,361.4897212982178,90.09132258097331,361.4897212982178,98.42465591430664C361.4897212982178,106.75798924763997,361.4897212982178,115.09132258097331,361.4897212982178,123.42465591430664C361.4897212982178,131.75798924763998,361.4897212982178,140.0913225809733,361.4897212982178,144.25798924763998L361.4897212982178,148.42465591430664" id="L-CMD2-BL-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-CMD2 LE-BL" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M361.4897212982178,188.84931182861328L361.4897212982178,193.01597849527994C361.4897212982178,197.18264516194662,361.4897212982178,205.51597849527994,361.4897212982178,213.84931182861328C361.4897212982178,222.18264516194662,361.4897212982178,230.51597849527994,361.4897212982178,234.68264516194662L361.4897212982178,238.84931182861328" id="L-BL-DB-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-BL LE-DB" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M361.4897212982178,309.30846405029297L361.4897212982178,313.47513071695965C361.4897212982178,317.6417973836263,361.4897212982178,325.97513071695965,361.4897212982178,337.0645449956258C361.4897212982178,348.153959274292,361.4897212982178,361.999454498291,361.4897212982178,368.9222021102905L361.4897212982178,375.84494972229004" id="L-DB-OUT-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-DB LE-OUT" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M151.7992819755108,431.6807787527101L154.2596752617782,436.03499751202406C156.72006854804562,440.389216271338,161.64085512058043,449.0976537899658,164.10124840684782,459.7372607010844C166.56164169311523,470.37686761220294,166.56164169311523,482.9476439158122,190.0918925603231,496.225260741196C213.62214342753092,509.5028775665798,260.6826451619466,523.4873349137382,284.2128960291545,530.4795635873173L307.7431468963623,537.4717922608966" id="L-ES-BROKER-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-ES LE-BROKER" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M361.4897212982178,416.2696056365967L361.4897212982178,423.1923532485962C361.4897212982178,430.1151008605957,361.4897212982178,443.9605960845947,361.4897212982178,457.16873184839886C361.4897212982178,470.37686761220294,361.4897212982178,482.9476439158122,361.4897212982178,495.5184202194214C361.4897212982178,508.0891965230306,361.4897212982178,520.6599728266398,361.4897212982178,526.9453609784445L361.4897212982178,533.230749130249" id="L-OUT-BROKER-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-OUT LE-BROKER" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M361.4897212982178,573.6554050445557L361.4897212982178,577.8220717112223C361.4897212982178,581.988738377889,361.4897212982178,590.3220717112223,361.4897212982178,601.4520889918009C361.4897212982178,612.5821062723795,361.4897212982178,626.5088075002035,361.4897212982178,633.4721581141154L361.4897212982178,640.4355087280273" id="L-BROKER-OTHER-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-BROKER LE-OTHER" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(166.56164169311523, 495.5184202194214)"><g class="label" transform="translate(-52.92465591430664, -12.712328910827637)"><foreignObject width="105.84931182861328" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">Publish Events</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(361.4897212982178, 495.5184202194214)"><g class="label" transform="translate(-52.92465591430664, -12.712328910827637)"><foreignObject width="105.84931182861328" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">Publish Events</span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default default" id="flowchart-BL-1586" transform="translate(361.4897212982178, 168.63698387145996)"><rect class="basic label-container" style="" rx="0" ry="0" x="-61.315067291259766" y="-20.212328910827637" width="122.63013458251953" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-53.815067291259766, -12.712328910827637)"><foreignObject width="107.63013458251953" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Business Logic</span></div></foreignObject></g></g><g class="node default default" id="flowchart-CMD2-1585" transform="translate(361.4897212982178, 53.21232795715332)"><rect class="basic label-container" style="" rx="0" ry="0" x="-44.404109954833984" y="-20.212328910827637" width="88.80821990966797" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-36.904109954833984, -12.712328910827637)"><foreignObject width="73.80821990966797" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Command</span></div></foreignObject></g></g><g class="node default default" id="flowchart-DB-1588" label-offset-y="10.011497893669018" transform="translate(361.4897212982178, 274.0788879394531)"><path style="" d="M 0,10.011497893669018 a 41.74657440185547,10.011497893669018 0,0,0 83.49314880371094 0 a 41.74657440185547,10.011497893669018 0,0,0 -83.49314880371094 0 l 0,50.43615571532429 a 41.74657440185547,10.011497893669018 0,0,0 83.49314880371094 0 l 0,-50.43615571532429" transform="translate(-41.74657440185547,-35.22957575133116)"></path><g class="label" style="" transform="translate(-34.24657440185547, -12.712328910827637)"><foreignObject width="68.49314880371094" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Database</span></div></foreignObject></g></g><g class="node default default" id="flowchart-OUT-1590" transform="translate(361.4897212982178, 396.05727767944336)"><rect class="basic label-container" style="" rx="0" ry="0" x="-33.29451942443848" y="-20.212328910827637" width="66.58903884887695" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-25.794519424438477, -12.712328910827637)"><foreignObject width="51.58903884887695" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Outbox</span></div></foreignObject></g></g><g class="node default default" id="flowchart-AGG-1578" transform="translate(130.0993137359619, 274.0788879394531)"><rect class="basic label-container" style="" rx="0" ry="0" x="-44.42465591430664" y="-20.212328910827637" width="88.84931182861328" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-36.92465591430664, -12.712328910827637)"><foreignObject width="73.84931182861328" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Aggregate</span></div></foreignObject></g></g><g class="node default default" id="flowchart-CMD-1577" transform="translate(130.0993137359619, 168.63698387145996)"><rect class="basic label-container" style="" rx="0" ry="0" x="-44.404109954833984" y="-20.212328910827637" width="88.80821990966797" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-36.904109954833984, -12.712328910827637)"><foreignObject width="73.80821990966797" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Command</span></div></foreignObject></g></g><g class="node default default" id="flowchart-ES-1580" label-offset-y="11.024321365816867" transform="translate(130.0993137359619, 396.05727767944336)"><path style="" d="M 0,11.024321365816867 a 49.301368713378906,11.024321365816867 0,0,0 98.60273742675781 0 a 49.301368713378906,11.024321365816867 0,0,0 -98.60273742675781 0 l 0,51.44897918747214 a 49.301368713378906,11.024321365816867 0,0,0 98.60273742675781 0 l 0,-51.44897918747214" transform="translate(-49.301368713378906,-36.74881095955294)"></path><g class="label" style="" transform="translate(-41.801368713378906, -12.712328910827637)"><foreignObject width="83.60273742675781" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Event Store</span></div></foreignObject></g></g><g class="node default default" id="flowchart-PROJ-1582" transform="translate(93.6369857788086, 553.4430770874023)"><rect class="basic label-container" style="" rx="0" ry="0" x="-47.075340270996094" y="-20.212328910827637" width="94.15068054199219" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-39.575340270996094, -12.712328910827637)"><foreignObject width="79.15068054199219" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Projections</span></div></foreignObject></g></g><g class="node default default" id="flowchart-RM-1584" label-offset-y="11.189308569217088" transform="translate(93.6369857788086, 660.6478366851807)"><path style="" d="M 0,11.189308569217088 a 50.636985778808594,11.189308569217088 0,0,0 101.27397155761719 0 a 50.636985778808594,11.189308569217088 0,0,0 -101.27397155761719 0 l 0,51.61396639087236 a 50.636985778808594,11.189308569217088 0,0,0 101.27397155761719 0 l 0,-51.61396639087236" transform="translate(-50.636985778808594,-36.99629176465327)"></path><g class="label" style="" transform="translate(-43.136985778808594, -12.712328910827637)"><foreignObject width="86.27397155761719" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Read Model</span></div></foreignObject></g></g><g class="node default default" id="flowchart-BROKER-1592" transform="translate(361.4897212982178, 553.4430770874023)"><rect class="basic label-container" style="" rx="0" ry="0" x="-53.74657440185547" y="-20.212328910827637" width="107.49314880371094" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-46.24657440185547, -12.712328910827637)"><foreignObject width="92.49314880371094" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Event Broker</span></div></foreignObject></g></g><g class="node default default" id="flowchart-OTHER-1596" transform="translate(361.4897212982178, 660.6478366851807)"><rect class="basic label-container" style="" rx="0" ry="0" x="-60.41095733642578" y="-20.212328910827637" width="120.82191467285156" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-52.91095733642578, -12.712328910827637)"><foreignObject width="105.82191467285156" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Other Services</span></div></foreignObject></g></g></g></g></g></svg></div>
+<p>Notice: both services can participate in Event-Driven Architecture. Service A uses Event Sourcing internally; Service B uses traditional state persistence. From the outside, both publish events to a broker. <strong>The internal persistence strategy is orthogonal to the communication pattern.</strong> </p>
+<p>You can have EDA without Event Sourcing. You can have Event Sourcing without EDA (though this is less common). They are independent choices.</p>
+<hr>
+<h2 class="atx" id="the-benefits-of-event-driven-architecture">The Benefits of Event-Driven Architecture</h2>
+<p>EDA has earned its place in the architect's toolkit through genuine, practical benefits:</p>
+<h3 class="atx" id="loose-coupling">Loose Coupling</h3>
+<p>When the Order Service publishes an <code>OrderPlaced</code> event, it doesn't need to know that the Notification Service exists. Tomorrow, you can add a Fraud Detection Service that also listens for orders. The Order Service remains unchanged. </p>
+<p>This is particularly powerful in large organisations where different teams own different services.</p>
+<h3 class="atx" id="scalability">Scalability</h3>
+<p>Event brokers like Kafka are designed to handle massive throughput. Consumers can scale independently based on their own load. If the Analytics Service falls behind, it can catch up at its own pace without affecting order processing. </p>
+<h3 class="atx" id="real-time-responsiveness">Real-Time Responsiveness</h3>
+<p>In traditional polling architectures, clients ask "Has anything changed?" repeatedly. In event-driven systems, updates flow to interested parties as they happen. </p>
+<h3 class="atx" id="a-concrete-example-e-commerce-order-processing">A Concrete Example: E-Commerce Order Processing</h3>
+<p>Consider a typical e-commerce scenario:</p>
+<div class="mermaid" data-processed="true"><svg id="mermaid-1764135632919" width="100%" xmlns="http://www.w3.org/2000/svg" height="994" style="max-width: 1467px;" viewBox="-50 -10 1467 994"><style>#mermaid-1764135632919 {font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#333;}#mermaid-1764135632919 .error-icon{fill:#552222;}#mermaid-1764135632919 .error-text{fill:#552222;stroke:#552222;}#mermaid-1764135632919 .edge-thickness-normal{stroke-width:2px;}#mermaid-1764135632919 .edge-thickness-thick{stroke-width:3.5px;}#mermaid-1764135632919 .edge-pattern-solid{stroke-dasharray:0;}#mermaid-1764135632919 .edge-pattern-dashed{stroke-dasharray:3;}#mermaid-1764135632919 .edge-pattern-dotted{stroke-dasharray:2;}#mermaid-1764135632919 .marker{fill:#333333;stroke:#333333;}#mermaid-1764135632919 .marker.cross{stroke:#333333;}#mermaid-1764135632919 svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#mermaid-1764135632919 .actor{stroke:hsl(259.6261682243, 59.7765363128%, 87.9019607843%);fill:#ECECFF;}#mermaid-1764135632919 text.actor&gt;tspan{fill:black;stroke:none;}#mermaid-1764135632919 .actor-line{stroke:grey;}#mermaid-1764135632919 .messageLine0{stroke-width:1.5;stroke-dasharray:none;stroke:#333;}#mermaid-1764135632919 .messageLine1{stroke-width:1.5;stroke-dasharray:2,2;stroke:#333;}#mermaid-1764135632919 #arrowhead path{fill:#333;stroke:#333;}#mermaid-1764135632919 .sequenceNumber{fill:white;}#mermaid-1764135632919 #sequencenumber{fill:#333;}#mermaid-1764135632919 #crosshead path{fill:#333;stroke:#333;}#mermaid-1764135632919 .messageText{fill:#333;stroke:#333;}#mermaid-1764135632919 .labelBox{stroke:hsl(259.6261682243, 59.7765363128%, 87.9019607843%);fill:#ECECFF;}#mermaid-1764135632919 .labelText,#mermaid-1764135632919 .labelText&gt;tspan{fill:black;stroke:none;}#mermaid-1764135632919 .loopText,#mermaid-1764135632919 .loopText&gt;tspan{fill:black;stroke:none;}#mermaid-1764135632919 .loopLine{stroke-width:2px;stroke-dasharray:2,2;stroke:hsl(259.6261682243, 59.7765363128%, 87.9019607843%);fill:hsl(259.6261682243, 59.7765363128%, 87.9019607843%);}#mermaid-1764135632919 .note{stroke:#aaaa33;fill:#fff5ad;}#mermaid-1764135632919 .noteText,#mermaid-1764135632919 .noteText&gt;tspan{fill:black;stroke:none;}#mermaid-1764135632919 .activation0{fill:#f4f4f4;stroke:#666;}#mermaid-1764135632919 .activation1{fill:#f4f4f4;stroke:#666;}#mermaid-1764135632919 .activation2{fill:#f4f4f4;stroke:#666;}#mermaid-1764135632919 .actorPopupMenu{position:absolute;}#mermaid-1764135632919 .actorPopupMenuPanel{position:absolute;fill:#ECECFF;box-shadow:0px 8px 16px 0px rgba(0,0,0,0.2);filter:drop-shadow(3px 5px 2px rgb(0 0 0 / 0.4));}#mermaid-1764135632919 .actor-man line{stroke:hsl(259.6261682243, 59.7765363128%, 87.9019607843%);fill:#ECECFF;}#mermaid-1764135632919 .actor-man circle,#mermaid-1764135632919 line{stroke:hsl(259.6261682243, 59.7765363128%, 87.9019607843%);fill:#ECECFF;stroke-width:2px;}#mermaid-1764135632919 :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g></g><defs><symbol id="computer" width="24" height="24"><path transform="scale(.5)" d="M2 2v13h20v-13h-20zm18 11h-16v-9h16v9zm-10.228 6l.466-1h3.524l.467 1h-4.457zm14.228 3h-24l2-6h2.104l-1.33 4h18.45l-1.297-4h2.073l2 6zm-5-10h-14v-7h14v7z"></path></symbol></defs><defs><symbol id="database" fill-rule="evenodd" clip-rule="evenodd"><path transform="scale(.5)" d="M12.258.001l.256.004.255.005.253.008.251.01.249.012.247.015.246.016.242.019.241.02.239.023.236.024.233.027.231.028.229.031.225.032.223.034.22.036.217.038.214.04.211.041.208.043.205.045.201.046.198.048.194.05.191.051.187.053.183.054.18.056.175.057.172.059.168.06.163.061.16.063.155.064.15.066.074.033.073.033.071.034.07.034.069.035.068.035.067.035.066.035.064.036.064.036.062.036.06.036.06.037.058.037.058.037.055.038.055.038.053.038.052.038.051.039.05.039.048.039.047.039.045.04.044.04.043.04.041.04.04.041.039.041.037.041.036.041.034.041.033.042.032.042.03.042.029.042.027.042.026.043.024.043.023.043.021.043.02.043.018.044.017.043.015.044.013.044.012.044.011.045.009.044.007.045.006.045.004.045.002.045.001.045v17l-.001.045-.002.045-.004.045-.006.045-.007.045-.009.044-.011.045-.012.044-.013.044-.015.044-.017.043-.018.044-.02.043-.021.043-.023.043-.024.043-.026.043-.027.042-.029.042-.03.042-.032.042-.033.042-.034.041-.036.041-.037.041-.039.041-.04.041-.041.04-.043.04-.044.04-.045.04-.047.039-.048.039-.05.039-.051.039-.052.038-.053.038-.055.038-.055.038-.058.037-.058.037-.06.037-.06.036-.062.036-.064.036-.064.036-.066.035-.067.035-.068.035-.069.035-.07.034-.071.034-.073.033-.074.033-.15.066-.155.064-.16.063-.163.061-.168.06-.172.059-.175.057-.18.056-.183.054-.187.053-.191.051-.194.05-.198.048-.201.046-.205.045-.208.043-.211.041-.214.04-.217.038-.22.036-.223.034-.225.032-.229.031-.231.028-.233.027-.236.024-.239.023-.241.02-.242.019-.246.016-.247.015-.249.012-.251.01-.253.008-.255.005-.256.004-.258.001-.258-.001-.256-.004-.255-.005-.253-.008-.251-.01-.249-.012-.247-.015-.245-.016-.243-.019-.241-.02-.238-.023-.236-.024-.234-.027-.231-.028-.228-.031-.226-.032-.223-.034-.22-.036-.217-.038-.214-.04-.211-.041-.208-.043-.204-.045-.201-.046-.198-.048-.195-.05-.19-.051-.187-.053-.184-.054-.179-.056-.176-.057-.172-.059-.167-.06-.164-.061-.159-.063-.155-.064-.151-.066-.074-.033-.072-.033-.072-.034-.07-.034-.069-.035-.068-.035-.067-.035-.066-.035-.064-.036-.063-.036-.062-.036-.061-.036-.06-.037-.058-.037-.057-.037-.056-.038-.055-.038-.053-.038-.052-.038-.051-.039-.049-.039-.049-.039-.046-.039-.046-.04-.044-.04-.043-.04-.041-.04-.04-.041-.039-.041-.037-.041-.036-.041-.034-.041-.033-.042-.032-.042-.03-.042-.029-.042-.027-.042-.026-.043-.024-.043-.023-.043-.021-.043-.02-.043-.018-.044-.017-.043-.015-.044-.013-.044-.012-.044-.011-.045-.009-.044-.007-.045-.006-.045-.004-.045-.002-.045-.001-.045v-17l.001-.045.002-.045.004-.045.006-.045.007-.045.009-.044.011-.045.012-.044.013-.044.015-.044.017-.043.018-.044.02-.043.021-.043.023-.043.024-.043.026-.043.027-.042.029-.042.03-.042.032-.042.033-.042.034-.041.036-.041.037-.041.039-.041.04-.041.041-.04.043-.04.044-.04.046-.04.046-.039.049-.039.049-.039.051-.039.052-.038.053-.038.055-.038.056-.038.057-.037.058-.037.06-.037.061-.036.062-.036.063-.036.064-.036.066-.035.067-.035.068-.035.069-.035.07-.034.072-.034.072-.033.074-.033.151-.066.155-.064.159-.063.164-.061.167-.06.172-.059.176-.057.179-.056.184-.054.187-.053.19-.051.195-.05.198-.048.201-.046.204-.045.208-.043.211-.041.214-.04.217-.038.22-.036.223-.034.226-.032.228-.031.231-.028.234-.027.236-.024.238-.023.241-.02.243-.019.245-.016.247-.015.249-.012.251-.01.253-.008.255-.005.256-.004.258-.001.258.001zm-9.258 20.499v.01l.001.021.003.021.004.022.005.021.006.022.007.022.009.023.01.022.011.023.012.023.013.023.015.023.016.024.017.023.018.024.019.024.021.024.022.025.023.024.024.025.052.049.056.05.061.051.066.051.07.051.075.051.079.052.084.052.088.052.092.052.097.052.102.051.105.052.11.052.114.051.119.051.123.051.127.05.131.05.135.05.139.048.144.049.147.047.152.047.155.047.16.045.163.045.167.043.171.043.176.041.178.041.183.039.187.039.19.037.194.035.197.035.202.033.204.031.209.03.212.029.216.027.219.025.222.024.226.021.23.02.233.018.236.016.24.015.243.012.246.01.249.008.253.005.256.004.259.001.26-.001.257-.004.254-.005.25-.008.247-.011.244-.012.241-.014.237-.016.233-.018.231-.021.226-.021.224-.024.22-.026.216-.027.212-.028.21-.031.205-.031.202-.034.198-.034.194-.036.191-.037.187-.039.183-.04.179-.04.175-.042.172-.043.168-.044.163-.045.16-.046.155-.046.152-.047.148-.048.143-.049.139-.049.136-.05.131-.05.126-.05.123-.051.118-.052.114-.051.11-.052.106-.052.101-.052.096-.052.092-.052.088-.053.083-.051.079-.052.074-.052.07-.051.065-.051.06-.051.056-.05.051-.05.023-.024.023-.025.021-.024.02-.024.019-.024.018-.024.017-.024.015-.023.014-.024.013-.023.012-.023.01-.023.01-.022.008-.022.006-.022.006-.022.004-.022.004-.021.001-.021.001-.021v-4.127l-.077.055-.08.053-.083.054-.085.053-.087.052-.09.052-.093.051-.095.05-.097.05-.1.049-.102.049-.105.048-.106.047-.109.047-.111.046-.114.045-.115.045-.118.044-.12.043-.122.042-.124.042-.126.041-.128.04-.13.04-.132.038-.134.038-.135.037-.138.037-.139.035-.142.035-.143.034-.144.033-.147.032-.148.031-.15.03-.151.03-.153.029-.154.027-.156.027-.158.026-.159.025-.161.024-.162.023-.163.022-.165.021-.166.02-.167.019-.169.018-.169.017-.171.016-.173.015-.173.014-.175.013-.175.012-.177.011-.178.01-.179.008-.179.008-.181.006-.182.005-.182.004-.184.003-.184.002h-.37l-.184-.002-.184-.003-.182-.004-.182-.005-.181-.006-.179-.008-.179-.008-.178-.01-.176-.011-.176-.012-.175-.013-.173-.014-.172-.015-.171-.016-.17-.017-.169-.018-.167-.019-.166-.02-.165-.021-.163-.022-.162-.023-.161-.024-.159-.025-.157-.026-.156-.027-.155-.027-.153-.029-.151-.03-.15-.03-.148-.031-.146-.032-.145-.033-.143-.034-.141-.035-.14-.035-.137-.037-.136-.037-.134-.038-.132-.038-.13-.04-.128-.04-.126-.041-.124-.042-.122-.042-.12-.044-.117-.043-.116-.045-.113-.045-.112-.046-.109-.047-.106-.047-.105-.048-.102-.049-.1-.049-.097-.05-.095-.05-.093-.052-.09-.051-.087-.052-.085-.053-.083-.054-.08-.054-.077-.054v4.127zm0-5.654v.011l.001.021.003.021.004.021.005.022.006.022.007.022.009.022.01.022.011.023.012.023.013.023.015.024.016.023.017.024.018.024.019.024.021.024.022.024.023.025.024.024.052.05.056.05.061.05.066.051.07.051.075.052.079.051.084.052.088.052.092.052.097.052.102.052.105.052.11.051.114.051.119.052.123.05.127.051.131.05.135.049.139.049.144.048.147.048.152.047.155.046.16.045.163.045.167.044.171.042.176.042.178.04.183.04.187.038.19.037.194.036.197.034.202.033.204.032.209.03.212.028.216.027.219.025.222.024.226.022.23.02.233.018.236.016.24.014.243.012.246.01.249.008.253.006.256.003.259.001.26-.001.257-.003.254-.006.25-.008.247-.01.244-.012.241-.015.237-.016.233-.018.231-.02.226-.022.224-.024.22-.025.216-.027.212-.029.21-.03.205-.032.202-.033.198-.035.194-.036.191-.037.187-.039.183-.039.179-.041.175-.042.172-.043.168-.044.163-.045.16-.045.155-.047.152-.047.148-.048.143-.048.139-.05.136-.049.131-.05.126-.051.123-.051.118-.051.114-.052.11-.052.106-.052.101-.052.096-.052.092-.052.088-.052.083-.052.079-.052.074-.051.07-.052.065-.051.06-.05.056-.051.051-.049.023-.025.023-.024.021-.025.02-.024.019-.024.018-.024.017-.024.015-.023.014-.023.013-.024.012-.022.01-.023.01-.023.008-.022.006-.022.006-.022.004-.021.004-.022.001-.021.001-.021v-4.139l-.077.054-.08.054-.083.054-.085.052-.087.053-.09.051-.093.051-.095.051-.097.05-.1.049-.102.049-.105.048-.106.047-.109.047-.111.046-.114.045-.115.044-.118.044-.12.044-.122.042-.124.042-.126.041-.128.04-.13.039-.132.039-.134.038-.135.037-.138.036-.139.036-.142.035-.143.033-.144.033-.147.033-.148.031-.15.03-.151.03-.153.028-.154.028-.156.027-.158.026-.159.025-.161.024-.162.023-.163.022-.165.021-.166.02-.167.019-.169.018-.169.017-.171.016-.173.015-.173.014-.175.013-.175.012-.177.011-.178.009-.179.009-.179.007-.181.007-.182.005-.182.004-.184.003-.184.002h-.37l-.184-.002-.184-.003-.182-.004-.182-.005-.181-.007-.179-.007-.179-.009-.178-.009-.176-.011-.176-.012-.175-.013-.173-.014-.172-.015-.171-.016-.17-.017-.169-.018-.167-.019-.166-.02-.165-.021-.163-.022-.162-.023-.161-.024-.159-.025-.157-.026-.156-.027-.155-.028-.153-.028-.151-.03-.15-.03-.148-.031-.146-.033-.145-.033-.143-.033-.141-.035-.14-.036-.137-.036-.136-.037-.134-.038-.132-.039-.13-.039-.128-.04-.126-.041-.124-.042-.122-.043-.12-.043-.117-.044-.116-.044-.113-.046-.112-.046-.109-.046-.106-.047-.105-.048-.102-.049-.1-.049-.097-.05-.095-.051-.093-.051-.09-.051-.087-.053-.085-.052-.083-.054-.08-.054-.077-.054v4.139zm0-5.666v.011l.001.02.003.022.004.021.005.022.006.021.007.022.009.023.01.022.011.023.012.023.013.023.015.023.016.024.017.024.018.023.019.024.021.025.022.024.023.024.024.025.052.05.056.05.061.05.066.051.07.051.075.052.079.051.084.052.088.052.092.052.097.052.102.052.105.051.11.052.114.051.119.051.123.051.127.05.131.05.135.05.139.049.144.048.147.048.152.047.155.046.16.045.163.045.167.043.171.043.176.042.178.04.183.04.187.038.19.037.194.036.197.034.202.033.204.032.209.03.212.028.216.027.219.025.222.024.226.021.23.02.233.018.236.017.24.014.243.012.246.01.249.008.253.006.256.003.259.001.26-.001.257-.003.254-.006.25-.008.247-.01.244-.013.241-.014.237-.016.233-.018.231-.02.226-.022.224-.024.22-.025.216-.027.212-.029.21-.03.205-.032.202-.033.198-.035.194-.036.191-.037.187-.039.183-.039.179-.041.175-.042.172-.043.168-.044.163-.045.16-.045.155-.047.152-.047.148-.048.143-.049.139-.049.136-.049.131-.051.126-.05.123-.051.118-.052.114-.051.11-.052.106-.052.101-.052.096-.052.092-.052.088-.052.083-.052.079-.052.074-.052.07-.051.065-.051.06-.051.056-.05.051-.049.023-.025.023-.025.021-.024.02-.024.019-.024.018-.024.017-.024.015-.023.014-.024.013-.023.012-.023.01-.022.01-.023.008-.022.006-.022.006-.022.004-.022.004-.021.001-.021.001-.021v-4.153l-.077.054-.08.054-.083.053-.085.053-.087.053-.09.051-.093.051-.095.051-.097.05-.1.049-.102.048-.105.048-.106.048-.109.046-.111.046-.114.046-.115.044-.118.044-.12.043-.122.043-.124.042-.126.041-.128.04-.13.039-.132.039-.134.038-.135.037-.138.036-.139.036-.142.034-.143.034-.144.033-.147.032-.148.032-.15.03-.151.03-.153.028-.154.028-.156.027-.158.026-.159.024-.161.024-.162.023-.163.023-.165.021-.166.02-.167.019-.169.018-.169.017-.171.016-.173.015-.173.014-.175.013-.175.012-.177.01-.178.01-.179.009-.179.007-.181.006-.182.006-.182.004-.184.003-.184.001-.185.001-.185-.001-.184-.001-.184-.003-.182-.004-.182-.006-.181-.006-.179-.007-.179-.009-.178-.01-.176-.01-.176-.012-.175-.013-.173-.014-.172-.015-.171-.016-.17-.017-.169-.018-.167-.019-.166-.02-.165-.021-.163-.023-.162-.023-.161-.024-.159-.024-.157-.026-.156-.027-.155-.028-.153-.028-.151-.03-.15-.03-.148-.032-.146-.032-.145-.033-.143-.034-.141-.034-.14-.036-.137-.036-.136-.037-.134-.038-.132-.039-.13-.039-.128-.041-.126-.041-.124-.041-.122-.043-.12-.043-.117-.044-.116-.044-.113-.046-.112-.046-.109-.046-.106-.048-.105-.048-.102-.048-.1-.05-.097-.049-.095-.051-.093-.051-.09-.052-.087-.052-.085-.053-.083-.053-.08-.054-.077-.054v4.153zm8.74-8.179l-.257.004-.254.005-.25.008-.247.011-.244.012-.241.014-.237.016-.233.018-.231.021-.226.022-.224.023-.22.026-.216.027-.212.028-.21.031-.205.032-.202.033-.198.034-.194.036-.191.038-.187.038-.183.04-.179.041-.175.042-.172.043-.168.043-.163.045-.16.046-.155.046-.152.048-.148.048-.143.048-.139.049-.136.05-.131.05-.126.051-.123.051-.118.051-.114.052-.11.052-.106.052-.101.052-.096.052-.092.052-.088.052-.083.052-.079.052-.074.051-.07.052-.065.051-.06.05-.056.05-.051.05-.023.025-.023.024-.021.024-.02.025-.019.024-.018.024-.017.023-.015.024-.014.023-.013.023-.012.023-.01.023-.01.022-.008.022-.006.023-.006.021-.004.022-.004.021-.001.021-.001.021.001.021.001.021.004.021.004.022.006.021.006.023.008.022.01.022.01.023.012.023.013.023.014.023.015.024.017.023.018.024.019.024.02.025.021.024.023.024.023.025.051.05.056.05.06.05.065.051.07.052.074.051.079.052.083.052.088.052.092.052.096.052.101.052.106.052.11.052.114.052.118.051.123.051.126.051.131.05.136.05.139.049.143.048.148.048.152.048.155.046.16.046.163.045.168.043.172.043.175.042.179.041.183.04.187.038.191.038.194.036.198.034.202.033.205.032.21.031.212.028.216.027.22.026.224.023.226.022.231.021.233.018.237.016.241.014.244.012.247.011.25.008.254.005.257.004.26.001.26-.001.257-.004.254-.005.25-.008.247-.011.244-.012.241-.014.237-.016.233-.018.231-.021.226-.022.224-.023.22-.026.216-.027.212-.028.21-.031.205-.032.202-.033.198-.034.194-.036.191-.038.187-.038.183-.04.179-.041.175-.042.172-.043.168-.043.163-.045.16-.046.155-.046.152-.048.148-.048.143-.048.139-.049.136-.05.131-.05.126-.051.123-.051.118-.051.114-.052.11-.052.106-.052.101-.052.096-.052.092-.052.088-.052.083-.052.079-.052.074-.051.07-.052.065-.051.06-.05.056-.05.051-.05.023-.025.023-.024.021-.024.02-.025.019-.024.018-.024.017-.023.015-.024.014-.023.013-.023.012-.023.01-.023.01-.022.008-.022.006-.023.006-.021.004-.022.004-.021.001-.021.001-.021-.001-.021-.001-.021-.004-.021-.004-.022-.006-.021-.006-.023-.008-.022-.01-.022-.01-.023-.012-.023-.013-.023-.014-.023-.015-.024-.017-.023-.018-.024-.019-.024-.02-.025-.021-.024-.023-.024-.023-.025-.051-.05-.056-.05-.06-.05-.065-.051-.07-.052-.074-.051-.079-.052-.083-.052-.088-.052-.092-.052-.096-.052-.101-.052-.106-.052-.11-.052-.114-.052-.118-.051-.123-.051-.126-.051-.131-.05-.136-.05-.139-.049-.143-.048-.148-.048-.152-.048-.155-.046-.16-.046-.163-.045-.168-.043-.172-.043-.175-.042-.179-.041-.183-.04-.187-.038-.191-.038-.194-.036-.198-.034-.202-.033-.205-.032-.21-.031-.212-.028-.216-.027-.22-.026-.224-.023-.226-.022-.231-.021-.233-.018-.237-.016-.241-.014-.244-.012-.247-.011-.25-.008-.254-.005-.257-.004-.26-.001-.26.001z"></path></symbol></defs><defs><symbol id="clock" width="24" height="24"><path transform="scale(.5)" d="M12 2c5.514 0 10 4.486 10 10s-4.486 10-10 10-10-4.486-10-10 4.486-10 10-10zm0-2c-6.627 0-12 5.373-12 12s5.373 12 12 12 12-5.373 12-12-5.373-12-12-12zm5.848 12.459c.202.038.202.333.001.372-1.907.361-6.045 1.111-6.547 1.111-.719 0-1.301-.582-1.301-1.301 0-.512.77-5.447 1.125-7.445.034-.192.312-.181.343.014l.985 6.238 5.394 1.011z"></path></symbol></defs><g><line id="actor63" x1="75" y1="5" x2="75" y2="928" class="200" stroke-width="0.5px" stroke="#999"></line><g id="root-63"><rect x="0" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="75" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="75" dy="0">Customer</tspan></text></g></g><g><line id="actor64" x1="275" y1="5" x2="275" y2="928" class="200" stroke-width="0.5px" stroke="#999"></line><g id="root-64"><rect x="200" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="275" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="275" dy="0">OrderService</tspan></text></g></g><g><line id="actor65" x1="492" y1="5" x2="492" y2="928" class="200" stroke-width="0.5px" stroke="#999"></line><g id="root-65"><rect x="417" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="492" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="492" dy="0">Event Broker</tspan></text></g></g><g><line id="actor66" x1="692" y1="5" x2="692" y2="928" class="200" stroke-width="0.5px" stroke="#999"></line><g id="root-66"><rect x="617" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="692" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="692" dy="0">Inventory</tspan></text></g></g><g><line id="actor67" x1="892" y1="5" x2="892" y2="928" class="200" stroke-width="0.5px" stroke="#999"></line><g id="root-67"><rect x="817" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="892" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="892" dy="0">Payment</tspan></text></g></g><g><line id="actor68" x1="1092" y1="5" x2="1092" y2="928" class="200" stroke-width="0.5px" stroke="#999"></line><g id="root-68"><rect x="1017" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="1092" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="1092" dy="0">Shipping</tspan></text></g></g><g><line id="actor69" x1="1292" y1="5" x2="1292" y2="928" class="200" stroke-width="0.5px" stroke="#999"></line><g id="root-69"><rect x="1217" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="1292" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="1292" dy="0">Email</tspan></text></g></g><defs><marker id="arrowhead" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs><defs><marker id="crosshead" markerWidth="15" markerHeight="8" orient="auto" refX="16" refY="4"><path fill="black" stroke="#000000" stroke-width="1px" d="M 9,2 V 6 L16,4 Z" style="stroke-dasharray: 0, 0;"></path><path fill="none" stroke="#000000" stroke-width="1px" d="M 0,1 L 6,7 M 6,1 L 0,7" style="stroke-dasharray: 0, 0;"></path></marker></defs><defs><marker id="filled-head" refX="18" refY="7" markerWidth="20" markerHeight="28" orient="auto"><path d="M 18,7 L9,13 L14,7 L9,1 Z"></path></marker></defs><defs><marker id="sequencenumber" refX="15" refY="15" markerWidth="60" markerHeight="40" orient="auto"><circle cx="15" cy="15" r="6"></circle></marker></defs><text x="175" y="80" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">Place Order</text><line x1="75" y1="111" x2="275" y2="111" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></line><text x="275" y="126" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">Validate &amp; Save Order</text><path d="M 275,157 C 335,147 335,187 275,177" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></path><text x="384" y="202" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">Publish OrderPlaced</text><line x1="275" y1="233" x2="492" y2="233" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></line><text x="592" y="293" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">OrderPlaced</text><line x1="492" y1="324" x2="692" y2="324" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></line><text x="692" y="339" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">Reserve Stock</text><path d="M 692,370 C 752,360 752,400 692,390" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></path><text x="592" y="415" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">StockReserved</text><line x1="692" y1="446" x2="492" y2="446" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></line><text x="692" y="486" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">OrderPlaced</text><line x1="492" y1="517" x2="892" y2="517" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></line><text x="892" y="532" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">Process Payment</text><path d="M 892,563 C 952,553 952,593 892,583" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></path><text x="692" y="608" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">PaymentCompleted</text><line x1="892" y1="639" x2="492" y2="639" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></line><text x="892" y="679" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">OrderPlaced</text><line x1="492" y1="710" x2="1292" y2="710" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></line><text x="684" y="725" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">Order Confirmation</text><line x1="1292" y1="756" x2="75" y2="756" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></line><g><line x1="65" y1="243" x2="1302" y2="243" class="loopLine"></line><line x1="1302" y1="243" x2="1302" y2="766" class="loopLine"></line><line x1="65" y1="766" x2="1302" y2="766" class="loopLine"></line><line x1="65" y1="243" x2="65" y2="766" class="loopLine"></line><line x1="65" y1="461" x2="1302" y2="461" class="loopLine" style="stroke-dasharray: 3, 3;"></line><line x1="65" y1="654" x2="1302" y2="654" class="loopLine" style="stroke-dasharray: 3, 3;"></line><polygon points="65,243 115,243 115,256 106.6,263 65,263" class="labelBox"></polygon><text x="90" y="256" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="labelText" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">par</text><text x="708.5" y="261" text-anchor="middle" class="loopText" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;"><tspan x="708.5">[Parallel Processing]</tspan></text></g><text x="792" y="781" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">PaymentCompleted + StockReserved</text><line x1="492" y1="812" x2="1092" y2="812" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></line><text x="1092" y="827" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" class="messageText" dy="1em" style="font-family: &quot;trebuchet ms&quot;, verdana, arial, sans-serif; font-size: 16px; font-weight: 400;">Schedule Delivery</text><path d="M 1092,858 C 1152,848 1152,888 1092,878" class="messageLine0" stroke-width="2" stroke="none" marker-end="url(#arrowhead)" style="fill: none;"></path><g><rect x="0" y="908" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="75" y="940.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="75" dy="0">Customer</tspan></text></g><g><rect x="200" y="908" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="275" y="940.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="275" dy="0">OrderService</tspan></text></g><g><rect x="417" y="908" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="492" y="940.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="492" dy="0">Event Broker</tspan></text></g><g><rect x="617" y="908" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="692" y="940.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="692" dy="0">Inventory</tspan></text></g><g><rect x="817" y="908" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="892" y="940.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="892" dy="0">Payment</tspan></text></g><g><rect x="1017" y="908" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="1092" y="940.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="1092" dy="0">Shipping</tspan></text></g><g><rect x="1217" y="908" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect><text x="1292" y="940.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle; font-size: 14px; font-weight: 400; font-family: Open-Sans, sans-serif;"><tspan x="1292" dy="0">Email</tspan></text></g></svg></div>
+<p>Each service handles its own concern. They scale independently. If the email service is slow, payments still process. If you need to add a loyalty points service next quarter, you simply subscribe to the relevant events. </p>
+<p>This is EDA working as intended: decoupled, scalable, resilient.</p>
+<hr>
+<h2 class="atx" id="the-hidden-costs-of-event-sourcing">The Hidden Costs of Event Sourcing</h2>
+<p>Now let me turn to Event Sourcing—not to dismiss it entirely, but to illuminate costs that are often glossed over in introductory articles.</p>
+<h3 class="atx" id="the-complexity-is-not-incidental">The Complexity Is Not Incidental</h3>
+<p>Event Sourcing fundamentally changes how you work with data. Every query becomes a replay operation (unless you maintain separate read models). Every "simple" change becomes a consideration of event schema evolution. Every bug fix raises questions about what to do with historical events. </p>
+<p>Microsoft's own documentation states plainly: "The complexity that event sourcing adds to a system is not justified for most systems." </p>
+<h3 class="atx" id="problem-1-schema-evolution">Problem 1: Schema Evolution</h3>
+<p>In traditional systems, adding a field to a database table is routine. In Event Sourcing, adding a field to an event is a design decision with long-term implications.</p>
+<p>Suppose you have an <code>OrderPlaced</code> event. A year in, you need to add a <code>discount_code</code> field. What value should this field have for the million orders placed before the change? When you replay events to rebuild a projection, do old orders suddenly appear to have no discount? Or do they inherit some default that may not have existed when they were placed? </p>
+<div class="mermaid" data-processed="true"><svg id="mermaid-1764135632961" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" height="338.123291015625" style="max-width: 815.2191772460938px;" viewBox="0 0 815.2191772460938 338.123291015625"><style>#mermaid-1764135632961 {font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#333;}#mermaid-1764135632961 .error-icon{fill:#552222;}#mermaid-1764135632961 .error-text{fill:#552222;stroke:#552222;}#mermaid-1764135632961 .edge-thickness-normal{stroke-width:2px;}#mermaid-1764135632961 .edge-thickness-thick{stroke-width:3.5px;}#mermaid-1764135632961 .edge-pattern-solid{stroke-dasharray:0;}#mermaid-1764135632961 .edge-pattern-dashed{stroke-dasharray:3;}#mermaid-1764135632961 .edge-pattern-dotted{stroke-dasharray:2;}#mermaid-1764135632961 .marker{fill:#333333;stroke:#333333;}#mermaid-1764135632961 .marker.cross{stroke:#333333;}#mermaid-1764135632961 svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#mermaid-1764135632961 .label{font-family:"trebuchet ms",verdana,arial,sans-serif;color:#333;}#mermaid-1764135632961 .cluster-label text{fill:#333;}#mermaid-1764135632961 .cluster-label span{color:#333;}#mermaid-1764135632961 .label text,#mermaid-1764135632961 span{fill:#333;color:#333;}#mermaid-1764135632961 .node rect,#mermaid-1764135632961 .node circle,#mermaid-1764135632961 .node ellipse,#mermaid-1764135632961 .node polygon,#mermaid-1764135632961 .node path{fill:#ECECFF;stroke:#9370DB;stroke-width:1px;}#mermaid-1764135632961 .node .label{text-align:center;}#mermaid-1764135632961 .node.clickable{cursor:pointer;}#mermaid-1764135632961 .arrowheadPath{fill:#333333;}#mermaid-1764135632961 .edgePath .path{stroke:#333333;stroke-width:2.0px;}#mermaid-1764135632961 .flowchart-link{stroke:#333333;fill:none;}#mermaid-1764135632961 .edgeLabel{background-color:#e8e8e8;text-align:center;}#mermaid-1764135632961 .edgeLabel rect{opacity:0.5;background-color:#e8e8e8;fill:#e8e8e8;}#mermaid-1764135632961 .cluster rect{fill:#ffffde;stroke:#aaaa33;stroke-width:1px;}#mermaid-1764135632961 .cluster text{fill:#333;}#mermaid-1764135632961 .cluster span{color:#333;}#mermaid-1764135632961 div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:12px;background:hsl(80, 100%, 96.2745098039%);border:1px solid #aaaa33;border-radius:2px;pointer-events:none;z-index:100;}#mermaid-1764135632961 :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g transform="translate(0, 0)"><marker id="flowchart-pointEnd" class="marker flowchart" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-pointStart" class="marker flowchart" viewBox="0 0 10 10" refX="0" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-circleEnd" class="marker flowchart" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-circleStart" class="marker flowchart" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-crossEnd" class="marker cross flowchart" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-crossStart" class="marker cross flowchart" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><g class="root"><g class="clusters"></g><g class="edgePaths"></g><g class="edgeLabels"></g><g class="nodes"><g class="root" transform="translate(0.5, 0)"><g class="clusters"><g class="cluster default" id="subGraph0"><rect style="" rx="0" ry="0" x="8" y="8" width="799.2191772460938" height="322.12328338623047"></rect><g class="cluster-label" transform="translate(311.11643981933594, 13)"><foreignObject width="192.98629760742188" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Schema Evolution Problem</span></div></foreignObject></g></g></g><g class="edgePaths"><path d="M186.123291015625,73.42465591430664L186.123291015625,79.71004406611125C186.123291015625,85.99543221791585,186.123291015625,98.56620852152507,211.41153271993002,112.37098411291173C236.69977442423502,126.17575970429839,287.27625783284503,141.21453458346247,312.5644995371501,148.73392202304453L337.8527412414551,156.25330946262656" id="L-OLD-PROJ-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-OLD LE-PROJ" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M575.7328796386719,73.42465591430664L575.7328796386719,79.71004406611125C575.7328796386719,85.99543221791585,575.7328796386719,98.56620852152507,550.4446379343668,112.37098411291173C525.1563962300619,126.17575970429839,474.57991282145184,141.21453458346247,449.2916711171468,148.73392202304453L424.0034294128418,156.25330946262656" id="L-NEW-PROJ-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-NEW LE-PROJ" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M380.92808532714844,189.27396965026855L380.92808532714844,195.55935780207315C380.92808532714844,201.84474595387778,380.92808532714844,214.41552225748697,380.92808532714844,226.9862985610962C380.92808532714844,239.5570748647054,380.92808532714844,252.1278511683146,380.92808532714844,258.4132393201192L380.92808532714844,264.6986274719238" id="L-PROJ-RESULT-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-PROJ LE-RESULT" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path></g><g class="edgeLabels"><g class="edgeLabel" transform="translate(186.123291015625, 111.13698482513428)"><g class="label" transform="translate(-24.904109954833984, -12.712328910827637)"><foreignObject width="49.80821990966797" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">Replay</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(575.7328796386719, 111.13698482513428)"><g class="label" transform="translate(-24.904109954833984, -12.712328910827637)"><foreignObject width="49.80821990966797" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">Replay</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(380.92808532714844, 226.9862985610962)"><g class="label" transform="translate(-13.34931468963623, -12.712328910827637)"><foreignObject width="26.69862937927246" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">???</span></div></foreignObject></g></g></g><g class="nodes"><g class="node default default" id="flowchart-OLD-1607" transform="translate(186.123291015625, 53.21232795715332)"><rect class="basic label-container" style="" rx="0" ry="0" x="-143.123291015625" y="-20.212328910827637" width="286.24658203125" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-135.623291015625, -12.712328910827637)"><foreignObject width="271.24658203125" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">OrderPlaced v1orderId, amount, items</span></div></foreignObject></g></g><g class="node default default" id="flowchart-PROJ-1610" transform="translate(380.92808532714844, 169.06164169311523)"><rect class="basic label-container" style="" rx="0" ry="0" x="-43.07534408569336" y="-20.212328910827637" width="86.15068817138672" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-35.57534408569336, -12.712328910827637)"><foreignObject width="71.15068817138672" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Projection</span></div></foreignObject></g></g><g class="node default default" id="flowchart-NEW-1608" transform="translate(575.7328796386719, 53.21232795715332)"><rect class="basic label-container" style="" rx="0" ry="0" x="-196.48629760742188" y="-20.212328910827637" width="392.97259521484375" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-188.98629760742188, -12.712328910827637)"><foreignObject width="377.97259521484375" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">OrderPlaced v2orderId, amount, items, discountCode</span></div></foreignObject></g></g><g class="node default default" id="flowchart-RESULT-1614" transform="translate(380.92808532714844, 284.91095542907715)"><rect class="basic label-container" style="" rx="0" ry="0" x="-108.44520568847656" y="-20.212328910827637" width="216.89041137695312" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-100.94520568847656, -12.712328910827637)"><foreignObject width="201.89041137695312" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">What discountfor v1 events?</span></div></foreignObject></g></g></g></g></g></g></g></svg></div>
+<p>Teams end up maintaining multiple event versions, upcasting old events to new formats, and building institutional knowledge about which versions mean what. This is manageable, but it's not free. </p>
+<h3 class="atx" id="problem-2-projection-drift-and-rebuild-pain">Problem 2: Projection Drift and Rebuild Pain</h3>
+<p>In Event Sourcing, read models (projections) are derived from events. When projections need to change—and they will—you must rebuild them from the event stream.</p>
+<p>Dennis Doomen documents a case where a single event stream grew to 100,000+ events, and projection rebuilds became a serious performance bottleneck. </p>
+<div class="mermaid" data-processed="true"><svg id="mermaid-1764135633011" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" height="240.88319396972656" style="max-width: 639.5753173828125px;" viewBox="0 0 639.5753173828125 240.88319396972656"><style>#mermaid-1764135633011 {font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#333;}#mermaid-1764135633011 .error-icon{fill:#552222;}#mermaid-1764135633011 .error-text{fill:#552222;stroke:#552222;}#mermaid-1764135633011 .edge-thickness-normal{stroke-width:2px;}#mermaid-1764135633011 .edge-thickness-thick{stroke-width:3.5px;}#mermaid-1764135633011 .edge-pattern-solid{stroke-dasharray:0;}#mermaid-1764135633011 .edge-pattern-dashed{stroke-dasharray:3;}#mermaid-1764135633011 .edge-pattern-dotted{stroke-dasharray:2;}#mermaid-1764135633011 .marker{fill:#333333;stroke:#333333;}#mermaid-1764135633011 .marker.cross{stroke:#333333;}#mermaid-1764135633011 svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#mermaid-1764135633011 .label{font-family:"trebuchet ms",verdana,arial,sans-serif;color:#333;}#mermaid-1764135633011 .cluster-label text{fill:#333;}#mermaid-1764135633011 .cluster-label span{color:#333;}#mermaid-1764135633011 .label text,#mermaid-1764135633011 span{fill:#333;color:#333;}#mermaid-1764135633011 .node rect,#mermaid-1764135633011 .node circle,#mermaid-1764135633011 .node ellipse,#mermaid-1764135633011 .node polygon,#mermaid-1764135633011 .node path{fill:#ECECFF;stroke:#9370DB;stroke-width:1px;}#mermaid-1764135633011 .node .label{text-align:center;}#mermaid-1764135633011 .node.clickable{cursor:pointer;}#mermaid-1764135633011 .arrowheadPath{fill:#333333;}#mermaid-1764135633011 .edgePath .path{stroke:#333333;stroke-width:2.0px;}#mermaid-1764135633011 .flowchart-link{stroke:#333333;fill:none;}#mermaid-1764135633011 .edgeLabel{background-color:#e8e8e8;text-align:center;}#mermaid-1764135633011 .edgeLabel rect{opacity:0.5;background-color:#e8e8e8;fill:#e8e8e8;}#mermaid-1764135633011 .cluster rect{fill:#ffffde;stroke:#aaaa33;stroke-width:1px;}#mermaid-1764135633011 .cluster text{fill:#333;}#mermaid-1764135633011 .cluster span{color:#333;}#mermaid-1764135633011 div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:12px;background:hsl(80, 100%, 96.2745098039%);border:1px solid #aaaa33;border-radius:2px;pointer-events:none;z-index:100;}#mermaid-1764135633011 :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g transform="translate(0, 0)"><marker id="flowchart-pointEnd" class="marker flowchart" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-pointStart" class="marker flowchart" viewBox="0 0 10 10" refX="0" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-circleEnd" class="marker flowchart" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-circleStart" class="marker flowchart" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-crossEnd" class="marker cross flowchart" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-crossStart" class="marker cross flowchart" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><g class="root"><g class="clusters"></g><g class="edgePaths"></g><g class="edgeLabels"></g><g class="nodes"><g class="root" transform="translate(0.5, 0)"><g class="clusters"><g class="cluster default" id="subGraph0"><rect style="" rx="0" ry="0" x="8" y="8" width="623.5753326416016" height="224.88319206237793"></rect><g class="cluster-label" transform="translate(254.85616302490234, 13)"><foreignObject width="129.86300659179688" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Projection Rebuild</span></div></foreignObject></g></g></g><g class="edgePaths"><path d="M256.09588623046875,107.23902176774774L266.2659772237142,101.90406281879574C276.43606821695965,96.56910386984372,296.7762502034505,85.89918597193969,317.1164321899414,80.56422702298767C337.4566141764323,75.22926807403564,357.79679616292316,75.22926807403564,367.96688715616864,75.22926807403564L378.13697814941406,75.22926807403564" id="L-ES-PROJ1-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-ES LE-PROJ1" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M256.09588623046875,133.6441702946302L266.2659772237142,138.9791292435822C276.43606821695965,144.31408819253423,296.7762502034505,154.98400609043824,317.1164321899414,160.31896503939026C337.4566141764323,165.65392398834229,357.79679616292316,165.65392398834229,367.96688715616864,165.65392398834229L378.13697814941406,165.65392398834229" id="L-ES-PROJ2-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-ES LE-PROJ2" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path></g><g class="edgeLabels"><g class="edgeLabel" transform="translate(317.1164321899414, 75.22926807403564)"><g class="label" transform="translate(-36.020545959472656, -12.712328910827637)"><foreignObject width="72.04109191894531" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">Replay All</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(317.1164321899414, 165.65392398834229)"><g class="label" transform="translate(-36.020545959472656, -12.712328910827637)"><foreignObject width="72.04109191894531" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">Replay All</span></div></foreignObject></g></g></g><g class="nodes"><g class="node default default" id="flowchart-ES-1621" label-offset-y="16.022588534898723" transform="translate(144.54794311523438, 120.44159603118896)"><path style="" d="M 0,16.022588534898723 a 111.54794311523438,16.022588534898723 0,0,0 223.09588623046875 0 a 111.54794311523438,16.022588534898723 0,0,0 -223.09588623046875 0 l 0,56.447246356554 a 111.54794311523438,16.022588534898723 0,0,0 223.09588623046875 0 l 0,-56.447246356554" transform="translate(-111.54794311523438,-44.246211713175725)"></path><g class="label" style="" transform="translate(-104.04794311523438, -12.712328910827637)"><foreignObject width="208.09588623046875" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Event StoreMillions of Events</span></div></foreignObject></g></g><g class="node default default" id="flowchart-PROJ1-1623" transform="translate(492.3561553955078, 75.22926807403564)"><rect class="basic label-container" style="" rx="0" ry="0" x="-114.21917724609375" y="-20.212328910827637" width="228.4383544921875" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-106.71917724609375, -12.712328910827637)"><foreignObject width="213.4383544921875" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Projection v1(hours to rebuild)</span></div></foreignObject></g></g><g class="node default default" id="flowchart-PROJ2-1625" transform="translate(492.3561553955078, 165.65392398834229)"><rect class="basic label-container" style="" rx="0" ry="0" x="-114.21917724609375" y="-20.212328910827637" width="228.4383544921875" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-106.71917724609375, -12.712328910827637)"><foreignObject width="213.4383544921875" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Projection v2(hours to rebuild)</span></div></foreignObject></g></g></g></g></g></g></g></svg></div>
+<p>You can mitigate this with snapshots, but snapshots are essentially... stored state. You're re-introducing the thing you were trying to avoid.</p>
+<h3 class="atx" id="problem-3-the-gdpr-paradox">Problem 3: The GDPR Paradox</h3>
+<p>Event Sourcing's selling point—immutable, complete history—becomes a liability when regulations demand data deletion.</p>
+<p>GDPR's "right to be forgotten" requires you to delete personal data on request. But in Event Sourcing, events are immutable. You can't simply delete the <code>CustomerRegistered</code> event—other events depend on it, projections depend on it, the entire stream's integrity depends on it. </p>
+<p>Teams resort to crypto-shredding (encrypting personal data and destroying keys), event tombstones, or complex anonymisation schemes. Each approach has trade-offs and adds complexity.</p>
+<h3 class="atx" id="problem-4-the-learning-curve-is-steep">Problem 4: The Learning Curve Is Steep</h3>
+<p>An empirical study of event-sourced systems in production found that "the steep learning curve" was one of the five most consistently cited challenges. </p>
+<p>This isn't about intelligence—it's about the sheer number of new concepts: aggregates, projections, event versioning, idempotent handlers, eventual consistency, compensating events, snapshots. Each concept is learnable, but together they represent a significant cognitive load for teams.</p>
+<h3 class="atx" id="a-cautionary-example-the-unbounded-event-stream">A Cautionary Example: The Unbounded Event Stream</h3>
+<p>Consider a financial data platform that chose Event Sourcing for a price-tracking system. Each price update became an event. With millions of price ticks daily across thousands of instruments, the event stream grew to terabytes.</p>
+<p>Replaying events to rebuild projections became impractical—measured not in minutes but in hours. The team ended up implementing daily snapshots, essentially maintaining parallel state stores, negating much of Event Sourcing's theoretical benefit while retaining its complexity. </p>
+<hr>
+<h2 class="atx" id="when-does-event-sourcing-make-sense">When Does Event Sourcing Make Sense?</h2>
+<p>I'm not arguing that Event Sourcing is never appropriate. It genuinely shines in specific contexts:</p>
+<ul>
+<li><strong>When the event history <em>is</em> the domain</strong>: Version control systems, collaborative editing, trading platforms where the sequence of operations is the business logic.</li>
+<li><strong>When temporal queries are a primary use case</strong>: "What was this account's state on March 15th?" is a business-critical question asked frequently, not a rare audit need.</li>
+<li><strong>When regulatory requirements mandate complete history</strong>: Some financial or legal domains require provable, immutable records.</li>
+</ul>
+<p>Even then, consider applying Event Sourcing to specific bounded contexts rather than the entire system. </p>
+<hr>
+<h2 class="atx" id="the-pragmatic-middle-ground">The Pragmatic Middle Ground</h2>
+<p>For most systems, there's a simpler approach that captures many benefits without the costs:</p>
+<div class="mermaid" data-processed="true"><svg id="mermaid-1764135633052" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" height="311.6867370605469" style="max-width: 1271.9794921875px;" viewBox="0 0 1271.9794921875 311.6867370605469"><style>#mermaid-1764135633052 {font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#333;}#mermaid-1764135633052 .error-icon{fill:#552222;}#mermaid-1764135633052 .error-text{fill:#552222;stroke:#552222;}#mermaid-1764135633052 .edge-thickness-normal{stroke-width:2px;}#mermaid-1764135633052 .edge-thickness-thick{stroke-width:3.5px;}#mermaid-1764135633052 .edge-pattern-solid{stroke-dasharray:0;}#mermaid-1764135633052 .edge-pattern-dashed{stroke-dasharray:3;}#mermaid-1764135633052 .edge-pattern-dotted{stroke-dasharray:2;}#mermaid-1764135633052 .marker{fill:#333333;stroke:#333333;}#mermaid-1764135633052 .marker.cross{stroke:#333333;}#mermaid-1764135633052 svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#mermaid-1764135633052 .label{font-family:"trebuchet ms",verdana,arial,sans-serif;color:#333;}#mermaid-1764135633052 .cluster-label text{fill:#333;}#mermaid-1764135633052 .cluster-label span{color:#333;}#mermaid-1764135633052 .label text,#mermaid-1764135633052 span{fill:#333;color:#333;}#mermaid-1764135633052 .node rect,#mermaid-1764135633052 .node circle,#mermaid-1764135633052 .node ellipse,#mermaid-1764135633052 .node polygon,#mermaid-1764135633052 .node path{fill:#ECECFF;stroke:#9370DB;stroke-width:1px;}#mermaid-1764135633052 .node .label{text-align:center;}#mermaid-1764135633052 .node.clickable{cursor:pointer;}#mermaid-1764135633052 .arrowheadPath{fill:#333333;}#mermaid-1764135633052 .edgePath .path{stroke:#333333;stroke-width:2.0px;}#mermaid-1764135633052 .flowchart-link{stroke:#333333;fill:none;}#mermaid-1764135633052 .edgeLabel{background-color:#e8e8e8;text-align:center;}#mermaid-1764135633052 .edgeLabel rect{opacity:0.5;background-color:#e8e8e8;fill:#e8e8e8;}#mermaid-1764135633052 .cluster rect{fill:#ffffde;stroke:#aaaa33;stroke-width:1px;}#mermaid-1764135633052 .cluster text{fill:#333;}#mermaid-1764135633052 .cluster span{color:#333;}#mermaid-1764135633052 div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:12px;background:hsl(80, 100%, 96.2745098039%);border:1px solid #aaaa33;border-radius:2px;pointer-events:none;z-index:100;}#mermaid-1764135633052 :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g transform="translate(0, 0)"><marker id="flowchart-pointEnd" class="marker flowchart" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-pointStart" class="marker flowchart" viewBox="0 0 10 10" refX="0" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-circleEnd" class="marker flowchart" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-circleStart" class="marker flowchart" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="flowchart-crossEnd" class="marker cross flowchart" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><marker id="flowchart-crossStart" class="marker cross flowchart" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><g class="root"><g class="clusters"></g><g class="edgePaths"></g><g class="edgeLabels"></g><g class="nodes"><g class="root" transform="translate(0.5, 0)"><g class="clusters"><g class="cluster default" id="subGraph0"><rect style="" rx="0" ry="0" x="8" y="8" width="1255.9794311523438" height="295.6867446899414"></rect><g class="cluster-label" transform="translate(544.3938293457031, 13)"><foreignObject width="183.1917724609375" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">State-First with Event Log</span></div></foreignObject></g></g></g><g class="edgePaths"><path d="M121.80821990966797,155.74954414367676L125.97488657633464,155.74954414367676C130.1415532430013,155.74954414367676,138.47488657633463,155.74954414367676,146.80821990966797,155.74954414367676C155.1415532430013,155.74954414367676,163.47488657633463,155.74954414367676,167.6415532430013,155.74954414367676L171.80821990966797,155.74954414367676" id="L-CMD-BL-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-CMD LE-BL" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M294.4383544921875,155.74954414367676L298.6050211588542,155.74954414367676C302.7716878255208,155.74954414367676,311.1050211588542,155.74954414367676,319.5216879049937,155.8328774770101C327.93835465113324,155.91621081034342,336.43835481007903,156.0828774770101,340.6883548895519,156.16621081034342L344.9383549690248,156.24954414367676" id="L-BL-TX-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-BL LE-TX" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M460.35062994635035,136.03721427917478L473.05588892827376,127.83565489451088C485.76114791019717,119.63409550984699,511.17166587404387,103.23097674051921,528.4294354353943,95.0294173558553C545.6872049967448,86.8278579711914,554.792226155599,86.8278579711914,559.344736735026,86.8278579711914L563.8972473144531,86.8278579711914" id="L-TX-STATE-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-TX LE-STATE" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M460.35062694171546,176.46187210083008L473.0558864244113,184.49676513671875C485.7611459071072,192.53165817260742,511.1716648724989,208.60144424438477,528.0435910218614,216.63633728027344C544.915517171224,224.6712303161621,553.2488505045573,224.6712303161621,557.415517171224,224.6712303161621L561.5821838378906,224.6712303161621" id="L-TX-EVENTS-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-TX LE-EVENTS" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M778.9520416259766,224.6712303161621L783.1187082926432,224.6712303161621C787.2853749593099,224.6712303161621,795.6187082926432,224.6712303161621,803.9520416259766,224.6712303161621C812.2853749593099,224.6712303161621,820.6187082926432,224.6712303161621,824.7853749593099,224.6712303161621L828.9520416259766,224.6712303161621" id="L-EVENTS-PUB-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-EVENTS LE-PUB" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M910.6643676757812,224.6712303161621L914.8310343424479,224.6712303161621C918.9977010091146,224.6712303161621,927.3310343424479,224.6712303161621,935.6643676757812,224.6712303161621C943.9977010091146,224.6712303161621,952.3310343424479,224.6712303161621,956.4977010091146,224.6712303161621L960.6643676757812,224.6712303161621" id="L-PUB-BROKER-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-PUB LE-BROKER" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path><path d="M1068.1575164794922,224.6712303161621L1072.324183146159,224.6712303161621C1076.4908498128254,224.6712303161621,1084.824183146159,224.6712303161621,1093.1575164794922,224.6712303161621C1101.4908498128254,224.6712303161621,1109.824183146159,224.6712303161621,1113.9908498128254,224.6712303161621L1118.1575164794922,224.6712303161621" id="L-BROKER-CONSUMERS-0" class=" edge-thickness-normal edge-pattern-solid flowchart-link LS-BROKER LE-CONSUMERS" style="fill:none;" marker-end="url(#flowchart-pointEnd)"></path></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default default" id="flowchart-BL-1642" transform="translate(233.12328720092773, 155.74954414367676)"><rect class="basic label-container" style="" rx="0" ry="0" x="-61.315067291259766" y="-20.212328910827637" width="122.63013458251953" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-53.815067291259766, -12.712328910827637)"><foreignObject width="107.63013458251953" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Business Logic</span></div></foreignObject></g></g><g class="node default default" id="flowchart-CMD-1641" transform="translate(77.40410995483398, 155.74954414367676)"><rect class="basic label-container" style="" rx="0" ry="0" x="-44.404109954833984" y="-20.212328910827637" width="88.80821990966797" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-36.904109954833984, -12.712328910827637)"><foreignObject width="73.80821990966797" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Command</span></div></foreignObject></g></g><g class="node default default" id="flowchart-TX-1644" transform="translate(428.01026916503906, 155.74954414367676)"><polygon points="10.106164455413818,0 157.03766775131226,0 167.14383220672607,-20.212328910827637 157.03766775131226,-40.42465782165527 10.106164455413818,-40.42465782165527 0,-20.212328910827637" class="label-container" transform="translate(-83.57191610336304,20.212328910827637)" style=""></polygon><g class="label" style="" transform="translate(-65.96575164794922, -12.712328910827637)"><foreignObject width="131.93150329589844" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Single Transaction</span></div></foreignObject></g></g><g class="node default default" id="flowchart-STATE-1646" label-offset-y="15.747313049979736" transform="translate(670.2671127319336, 86.8278579711914)"><path style="" d="M 0,15.747313049979736 a 106.36986541748047,15.747313049979736 0,0,0 212.73973083496094 0 a 106.36986541748047,15.747313049979736 0,0,0 -212.73973083496094 0 l 0,56.17197087163501 a 106.36986541748047,15.747313049979736 0,0,0 212.73973083496094 0 l 0,-56.17197087163501" transform="translate(-106.36986541748047,-43.83329848579724)"></path><g class="label" style="" transform="translate(-98.86986541748047, -12.712328910827637)"><foreignObject width="197.73973083496094" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">State TablesSource of Truth</span></div></foreignObject></g></g><g class="node default default" id="flowchart-EVENTS-1648" label-offset-y="15.872444145085174" transform="translate(670.2671127319336, 224.6712303161621)"><path style="" d="M 0,15.872444145085174 a 108.68492889404297,15.872444145085174 0,0,0 217.36985778808594 0 a 108.68492889404297,15.872444145085174 0,0,0 -217.36985778808594 0 l 0,56.29710196674045 a 108.68492889404297,15.872444145085174 0,0,0 217.36985778808594 0 l 0,-56.29710196674045" transform="translate(-108.68492889404297,-44.0209951284554)"></path><g class="label" style="" transform="translate(-101.18492889404297, -12.712328910827637)"><foreignObject width="202.36985778808594" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Event LogAudit + Integration</span></div></foreignObject></g></g><g class="node default default" id="flowchart-PUB-1650" transform="translate(869.8082046508789, 224.6712303161621)"><rect class="basic label-container" style="" rx="0" ry="0" x="-40.856163024902344" y="-20.212328910827637" width="81.71232604980469" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-33.356163024902344, -12.712328910827637)"><foreignObject width="66.71232604980469" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Publisher</span></div></foreignObject></g></g><g class="node default default" id="flowchart-BROKER-1652" transform="translate(1014.4109420776367, 224.6712303161621)"><rect class="basic label-container" style="" rx="0" ry="0" x="-53.74657440185547" y="-20.212328910827637" width="107.49314880371094" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-46.24657440185547, -12.712328910827637)"><foreignObject width="92.49314880371094" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Event Broker</span></div></foreignObject></g></g><g class="node default default" id="flowchart-CONSUMERS-1654" transform="translate(1178.568473815918, 224.6712303161621)"><rect class="basic label-container" style="" rx="0" ry="0" x="-60.41095733642578" y="-20.212328910827637" width="120.82191467285156" height="40.42465782165527"></rect><g class="label" style="" transform="translate(-52.91095733642578, -12.712328910827637)"><foreignObject width="105.82191467285156" height="25.424657821655273"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">Other Services</span></div></foreignObject></g></g></g></g></g></g></g></svg></div>
+<p><strong>Store state as state.</strong> Your <code>accounts</code> table holds current balances. Queries are fast and consistent.</p>
+<p><strong>Log events alongside state changes.</strong> In the same transaction, append an event to an outbox table. You get audit history, integration capability, and the ability to replay if needed.</p>
+<p><strong>Publish events for EDA.</strong> A separate process reads the outbox and publishes to your broker.</p>
+<p>This gives you:</p>
+<ul>
+<li>Strong consistency for reads</li>
+<li>Complete audit trail</li>
+<li>Event-driven integration with other services</li>
+<li>The option to build eventually-consistent read models where valuable</li>
+</ul>
+<p>You lose the ability to derive state purely from events—but you probably didn't need that anyway.</p>
+<hr>
+<h2 class="atx" id="conclusion">Conclusion</h2>
+<p>The distinction between Event-Driven Architecture and Event Sourcing matters because conflating them leads to poor architectural decisions.</p>
+<p><strong>Event-Driven Architecture</strong> is about communication. It's a proven pattern for building scalable, decoupled systems. Most organisations can benefit from it.</p>
+<p><strong>Event Sourcing</strong> is about persistence. It's a specialised pattern with genuine benefits in specific contexts and significant costs in all contexts. Most organisations should not adopt it without clear, concrete requirements that justify the complexity.</p>
+<p>When someone proposes Event Sourcing, ask: "What specific problem does this solve for us?" If the answer is "complete audit history," an event log solves that. If the answer is "we want events for integration," EDA solves that without Event Sourcing. If the answer is "everyone's doing it" or "it seems modern," that's not a requirement—it's a trend.</p>
+<p>Build the simplest thing that meets your actual needs. You can always add complexity later; removing it is much harder.</p>
+<hr>
+<p><em>The best architecture is the one that solves your actual problems with the minimum necessary complexity. Everything else is borrowing trouble from your future self.</em></p>
+</article>
+</body>
+</html>
